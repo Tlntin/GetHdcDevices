@@ -26,11 +26,13 @@ It ships as a single native `.exe` / `.msi` (~5 MB) with low memory usage, built
 
 ## Screenshots
 
-> _Add screenshots / a GIF of the app here._
->
-> ```
-> docs/screenshot.png
-> ```
+<div align="center">
+
+![GetHdcDevices — main window](img/screen-zh.png)
+
+<sub>Main window — discover (broadcast / port scan), one-click connect, and connected / history device management.</sub>
+
+</div>
 
 ## Features
 

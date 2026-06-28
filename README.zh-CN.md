@@ -26,11 +26,13 @@
 
 ## 截图
 
-> _在此处放置应用截图或演示 GIF。_
->
-> ```
-> docs/screenshot.png
-> ```
+<div align="center">
+
+![GetHdcDevices 主界面](img/screen-zh.png)
+
+<sub>主界面 —— 发现设备（广播 / 端口扫描）、一键连接、已连接与历史设备管理。</sub>
+
+</div>
 
 ## 功能特性
 
