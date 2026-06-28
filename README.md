@@ -43,6 +43,7 @@ It ships as a single native `.exe` / `.msi` (~5 MB) with low memory usage, built
 - 🧠 **Device memory & history** — bind custom notes/names to a device's MAC; reconnect history devices when they come back online (🟢).
 - ⌨️ **Manual connect** — type an `IP:port` directly.
 - 🎨 **Themes** — 4 modern palettes (eclipse / carbon / daybreak / mist), light & dark, with an instant no-flash theme switcher.
+- 🌐 **Multilingual UI** — English, Simplified Chinese, and Hong Kong Traditional Chinese, switchable from a dropdown. The system language is auto-detected on first launch (falls back to English).
 - 🖥️ **System tray** — closing the window minimizes to the tray; the tray menu offers Show / Scan / Autostart / Quit, and a left-click reopens the window.
 - 🚀 **Launch on startup** — optionally start minimized to the tray on Windows login.
 - ⚙️ **Settings** — custom `hdc` path (auto-detected by default), scan ports, wireless port, timeouts, and concurrency (saved locally).
@@ -109,6 +110,7 @@ GetHdcDevices/
 ├─ index.html            # UI structure
 ├─ src/
 │  ├─ main.ts            # Frontend logic (Tauri command calls, events, rendering, themes)
+│  ├─ i18n.ts            # Translations + language detection (en / zh-CN / zh-HK)
 │  └─ styles.css         # Themed token system (light/dark)
 └─ src-tauri/
    ├─ src/

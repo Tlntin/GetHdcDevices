@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  t,
+  setLang,
+  detectLang,
+  isLang,
+  applyStaticTranslations,
+  LANGS,
+  type Lang,
+} from "./i18n";
 
 // ---------- Types (match Rust serde structs; returns are snake_case) ----------
 interface HdcInfo {
@@ -84,6 +93,7 @@ interface Settings {
   pollInterval: number; // seconds; 0 = off
   connectTimeout: number; // hdc tconn timeout (ms)
   theme: string;
+  lang: Lang;
 }
 const DEFAULTS: Settings = {
   hdcPath: "",
@@ -94,20 +104,20 @@ const DEFAULTS: Settings = {
   pollInterval: 10,
   connectTimeout: 2000,
   theme: "eclipse",
+  lang: "en",
 };
 
 // ---------- Themes ----------
 interface ThemeDef {
   id: string;
-  name: string;
-  tag: string;
   swatch: [string, string, string]; // [bg, surface, accent]
 }
+// Display name/tag come from i18n (theme.<id>.name / theme.<id>.tag).
 const THEMES: ThemeDef[] = [
-  { id: "eclipse", name: "暗夜", tag: "深色 · 靛蓝", swatch: ["#0a0b10", "#191c26", "#6366f1"] },
-  { id: "carbon", name: "碳黑", tag: "深色 · 天青", swatch: ["#0b0c0e", "#1a1d21", "#38bdf8"] },
-  { id: "daybreak", name: "晨曦", tag: "浅色 · 靛蓝", swatch: ["#f5f6f9", "#ffffff", "#6366f1"] },
-  { id: "mist", name: "薄雾", tag: "浅色 · 青碧", swatch: ["#f2f6f5", "#ffffff", "#0d9488"] },
+  { id: "eclipse", swatch: ["#0a0b10", "#191c26", "#6366f1"] },
+  { id: "carbon", swatch: ["#0b0c0e", "#1a1d21", "#38bdf8"] },
+  { id: "daybreak", swatch: ["#f5f6f9", "#ffffff", "#6366f1"] },
+  { id: "mist", swatch: ["#f2f6f5", "#ffffff", "#0d9488"] },
 ];
 function applyTheme(id: string) {
   const valid = THEMES.some((t) => t.id === id) ? id : DEFAULTS.theme;
@@ -118,14 +128,14 @@ function applyTheme(id: string) {
 function paintThemeGrid(el: Element | null) {
   if (!el) return;
   el.innerHTML = THEMES.map(
-    (t) => `
-    <button type="button" class="theme-card${t.id === settings.theme ? " active" : ""}" data-theme-id="${t.id}">
-      <div class="theme-swatch" style="background:${t.swatch[0]}">
-        <i style="background:${t.swatch[1]}"></i>
-        <i class="s-accent" style="background:${t.swatch[2]}"></i>
+    (tm) => `
+    <button type="button" class="theme-card${tm.id === settings.theme ? " active" : ""}" data-theme-id="${tm.id}">
+      <div class="theme-swatch" style="background:${tm.swatch[0]}">
+        <i style="background:${tm.swatch[1]}"></i>
+        <i class="s-accent" style="background:${tm.swatch[2]}"></i>
       </div>
-      <div class="theme-name">${t.name}</div>
-      <div class="theme-tag">${t.tag}</div>
+      <div class="theme-name">${t(`theme.${tm.id}.name`)}</div>
+      <div class="theme-tag">${t(`theme.${tm.id}.tag`)}</div>
     </button>`
   ).join("");
 }
@@ -138,11 +148,17 @@ const SETTINGS_KEY = "gethdc.settings";
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const s: Settings = { ...DEFAULTS, ...parsed };
+      // First run (no saved language) → auto-detect from the system language.
+      if (!isLang(parsed.lang)) s.lang = detectLang();
+      return s;
+    }
   } catch (_) {
     /* ignore */
   }
-  return { ...DEFAULTS };
+  return { ...DEFAULTS, lang: detectLang() };
 }
 function saveSettings(s: Settings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
@@ -185,7 +201,7 @@ function log(level: LogLevel, msg: string) {
 function renderLogs() {
   const box = $("#log-body");
   if (logs.length === 0) {
-    box.innerHTML = `<div class="empty">暂无日志。</div>`;
+    box.innerHTML = `<div class="empty">${esc(t("log.empty"))}</div>`;
     return;
   }
   box.innerHTML = logs
@@ -230,13 +246,13 @@ let stopRequested = false;
 async function stopScan() {
   stopRequested = true;
   scanAllAbort = true;
-  $("#scan-progress-text").textContent = "正在停止…";
+  $("#scan-progress-text").textContent = t("progress.stopping");
   try {
     await invoke("cancel_scan");
   } catch (_) {
     /* ignore */
   }
-  toast("已请求停止扫描", "info");
+  toast(t("toast.stopRequested"), "info");
 }
 
 function selectedSubnet(): { network: string; prefix: number } | null {
@@ -362,21 +378,30 @@ async function detectHdc() {
   const text = $("#hdc-status-text");
   const detail = $("#hdc-detail");
   pill.className = "hdc-pill pill-warn";
-  text.textContent = "检测 hdc 中…";
+  text.textContent = t("hdc.detecting");
   try {
     const info = await invoke<HdcInfo>("detect_hdc", { hdcPath: hdcPathArg() });
-    log("ok", `检测到 hdc ${info.version} @ ${info.path}（HDC_SERVER_PORT=${info.server_port ?? "未设"}）`);
+    log(
+      "ok",
+      t("log.hdcDetected", {
+        version: info.version,
+        path: info.path,
+        port: info.server_port ?? t("hdc.notSet"),
+      })
+    );
     pill.className = "hdc-pill pill-ok";
     text.textContent = `hdc ${info.version}`;
     pill.title = info.path;
     detail.innerHTML =
-      `<b>路径:</b> ${esc(info.path)}<br/>` +
-      `<b>版本:</b> ${esc(info.version)}<br/>` +
-      `<b>HDC_SERVER_PORT:</b> ${esc(info.server_port ?? "（未设置）")}`;
+      `<b>${esc(t("hdc.detailPath"))}:</b> ${esc(info.path)}<br/>` +
+      `<b>${esc(t("hdc.detailVersion"))}:</b> ${esc(info.version)}<br/>` +
+      `<b>${esc(t("hdc.detailServerPort"))}:</b> ${esc(info.server_port ?? t("hdc.notSet"))}`;
   } catch (e) {
     pill.className = "hdc-pill pill-err";
-    text.textContent = "未找到 hdc";
-    detail.innerHTML = `<span style="color:var(--red)">${esc(String(e))}</span>`;
+    text.textContent = t("hdc.notFound");
+    detail.innerHTML =
+      `<span style="color:var(--red)">${esc(t("hdc.notFoundHint"))}</span><br/>` +
+      `<span class="muted">${esc(String(e))}</span>`;
   }
 }
 
@@ -388,7 +413,7 @@ async function loadInterfaces() {
     const ifaces = await invoke<NetIface[]>("get_interfaces");
     if (ifaces.length === 0) {
       const opt = document.createElement("option");
-      opt.textContent = "未检测到可用网卡";
+      opt.textContent = t("iface.none");
       sel.appendChild(opt);
       return;
     }
@@ -397,11 +422,17 @@ async function loadInterfaces() {
       opt.dataset.network = f.network;
       opt.dataset.prefix = String(f.prefix);
       const tag = f.is_private ? "" : " ⚠";
-      opt.textContent = `${f.name} · ${f.ip}/${f.prefix}（${f.usable_hosts} 台）${tag}`;
+      opt.textContent =
+        t("iface.option", {
+          name: f.name,
+          ip: f.ip,
+          prefix: f.prefix,
+          hosts: f.usable_hosts,
+        }) + tag;
       sel.appendChild(opt);
     }
   } catch (e) {
-    toast("获取网卡失败: " + e, "err");
+    toast(t("toast.ifaceFail", { e: String(e) }), "err");
   }
 }
 
@@ -425,10 +456,10 @@ function isCurrent(d: Device): boolean {
 function timeAgo(ts: number): string {
   if (!ts) return "";
   const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return `${Math.floor(s / 86400)} 天前`;
+  if (s < 60) return t("time.justNow");
+  if (s < 3600) return t("time.minAgo", { n: Math.floor(s / 60) });
+  if (s < 86400) return t("time.hourAgo", { n: Math.floor(s / 3600) });
+  return t("time.dayAgo", { n: Math.floor(s / 86400) });
 }
 
 // UART (COM serial) ports are PC-side debug ports, not wireless/USB devices.
@@ -441,7 +472,7 @@ function renderDevices() {
   const current = devices.filter((d) => isCurrent(d) && isManaged(d));
   $("#device-count").textContent = String(current.length);
   if (current.length === 0) {
-    list.innerHTML = `<div class="empty">暂无在连设备。扫描端口后会自动尝试连接。</div>`;
+    list.innerHTML = `<div class="empty">${esc(t("connected.empty"))}</div>`;
   } else {
     list.innerHTML = current
       .map((d) => {
@@ -461,10 +492,10 @@ function renderDevices() {
         // TCP rows open a detail popup on click (edit note / disconnect);
         // USB rows keep inline note + 开启无线 and aren't click-to-detail.
         const actions = isTcp
-          ? `<button class="btn btn-danger btn-sm" data-act="disconnect" data-key="${esc(d.connect_key)}">断开</button>
+          ? `<button class="btn btn-danger btn-sm" data-act="disconnect" data-key="${esc(d.connect_key)}">${esc(t("btn.disconnect"))}</button>
              <span class="row-chev">›</span>`
-          : `<button class="btn btn-ghost btn-sm" data-act="note" data-id="${esc(id.id)}">备注</button>
-             <button class="btn btn-ghost btn-sm" data-act="wireless" data-key="${esc(d.connect_key)}">开启无线</button>`;
+          : `<button class="btn btn-ghost btn-sm" data-act="note" data-id="${esc(id.id)}">${esc(t("btn.note"))}</button>
+             <button class="btn btn-ghost btn-sm" data-act="wireless" data-key="${esc(d.connect_key)}">${esc(t("btn.wireless"))}</button>`;
         const rowCls = isTcp ? "row-item host-row" : "row-item";
         const rowData = isTcp ? `data-act="detail-connected" data-key="${esc(d.connect_key)}"` : "";
         return `
@@ -511,7 +542,7 @@ function renderHistory() {
     .sort((a, b) => (b.lastConnected || 0) - (a.lastConnected || 0));
   $("#history-count").textContent = String(items.length);
   if (items.length === 0) {
-    list.innerHTML = `<div class="empty">暂无历史设备。</div>`;
+    list.innerHTML = `<div class="empty">${esc(t("history.empty"))}</div>`;
     return;
   }
   list.innerHTML = items
@@ -520,29 +551,29 @@ function renderHistory() {
       const online = isHistoryOnline(r);
       const statusBadge = r.lastTarget
         ? online
-          ? `<span class="badge badge-on">🟢 在线 · 可连接</span>`
-          : `<span class="badge badge-off">⚪ 离线</span>`
+          ? `<span class="badge badge-on">${esc(t("history.online"))}</span>`
+          : `<span class="badge badge-off">${esc(t("history.offline"))}</span>`
         : "";
       const sub = [
         statusBadge,
         r.lastTarget ? `<span class="muted">${esc(r.lastTarget)}</span>` : "",
         r.name && r.note ? `<span class="muted">${esc(r.name)}</span>` : "",
         r.mac ? `<span class="muted">${esc(r.mac)}</span>` : "",
-        r.lastConnected ? `<span class="muted">上次 ${timeAgo(r.lastConnected)}</span>` : "",
+        r.lastConnected ? `<span class="muted">${esc(t("history.last", { ago: timeAgo(r.lastConnected) }))}</span>` : "",
       ]
         .filter(Boolean)
         .join("");
       const connectBtn = r.lastTarget
         ? `<button class="btn ${online ? "btn-primary" : "btn-ghost"} btn-sm" data-act="connect" data-target="${esc(
             r.lastTarget
-          )}">连接</button>`
+          )}">${esc(t("btn.connect"))}</button>`
         : "";
       return `
       <div class="row-item host-row" data-act="detail" data-id="${esc(r.id)}">
         <div class="dev-icon">🕘</div>
         <div class="dev-main">
           <div class="dev-key">${esc(title)}</div>
-          <div class="dev-sub">${sub || '<span class="muted">无记录</span>'}</div>
+          <div class="dev-sub">${sub || `<span class="muted">${esc(t("history.noRecord"))}</span>`}</div>
         </div>
         <div class="dev-actions">
           ${connectBtn}
@@ -622,18 +653,18 @@ async function fetchNames() {
 
 function editNote(id: string) {
   const cur = book[id]?.note || "";
-  const v = prompt("设备备注（绑定 MAC，IP 变了也不丢）：", cur);
+  const v = prompt(t("prompt.note"), cur);
   if (v === null) return;
   if (!book[id]) book[id] = { id, kind: "UNKNOWN", lastConnected: 0 };
   book[id].note = v.trim();
   saveBook();
   renderDevices();
   renderCandidates();
-  toast("备注已保存", "ok");
+  toast(t("toast.noteSaved"), "ok");
 }
 function forgetDevice(id: string) {
   if (!book[id]) return;
-  if (!confirm("从历史中删除该设备记录？（备注也会一并删除）")) return;
+  if (!confirm(t("confirm.forget"))) return;
   delete book[id];
   saveBook();
   renderDevices();
@@ -656,11 +687,11 @@ function openDeviceModal(ctx: {
   extra?: string;
 }) {
   dmCtx = { bookId: ctx.bookId, mode: ctx.mode, connectKey: ctx.connectKey };
-  $("#dm-title").textContent = ctx.title || ctx.note || ctx.name || ctx.ip || "设备详情";
-  $("#dm-name").textContent = ctx.name || "（未知，连接成功后自动获取）";
+  $("#dm-title").textContent = ctx.title || ctx.note || ctx.name || ctx.ip || t("dm.title");
+  $("#dm-name").textContent = ctx.name || t("dm.nameUnknown");
   ($("#dm-ip") as HTMLInputElement).value = ctx.ip || "";
   ($("#dm-port") as HTMLInputElement).value = ctx.port != null ? String(ctx.port) : "";
-  $("#dm-mac").textContent = ctx.mac || "（未知）";
+  $("#dm-mac").textContent = ctx.mac || t("dm.macUnknown");
   ($("#dm-note") as HTMLInputElement).value = ctx.note || "";
   $("#dm-extra").textContent = ctx.extra || "";
   // Delete only makes sense for a saved history record.
@@ -668,7 +699,7 @@ function openDeviceModal(ctx: {
   // Connected devices get 断开 (red); history/host get 连接 (blue).
   const primary = $("#dm-connect") as HTMLButtonElement;
   const connected = ctx.mode === "connected";
-  primary.textContent = connected ? "断开" : "连接";
+  primary.textContent = connected ? t("btn.disconnect") : t("btn.connect");
   primary.className = connected ? "btn btn-danger" : "btn btn-primary";
   // IP/port are connection inputs — read-only-feel for an already-connected device.
   const ipEl = $("#dm-ip") as HTMLInputElement;
@@ -696,7 +727,7 @@ function dmSaveNote(silent = false) {
   renderDevices();
   renderCandidates();
   renderHosts();
-  if (!silent) toast("已保存", "ok");
+  if (!silent) toast(t("toast.saved"), "ok");
 }
 /** Primary button: 断开 for a connected device, otherwise 连接. */
 async function dmPrimary() {
@@ -713,7 +744,7 @@ async function dmConnect() {
   const ip = ($("#dm-ip") as HTMLInputElement).value.trim();
   const port = ($("#dm-port") as HTMLInputElement).value.trim();
   if (!ip || !/^\d+$/.test(port)) {
-    toast("请填写有效的 IP 和端口", "err");
+    toast(t("toast.invalidIpPort"), "err");
     return;
   }
   dmSaveNote(true); // persist note/target before connecting
@@ -739,8 +770,8 @@ function openHistoryDetail(id: string) {
     note: r.note,
     bookId: id,
     mode: "history",
-    title: r.note || r.name || "历史设备",
-    extra: r.lastConnected ? `上次连接：${timeAgo(r.lastConnected)}` : "",
+    title: r.note || r.name || t("history.title"),
+    extra: r.lastConnected ? t("dm.lastConnected", { ago: timeAgo(r.lastConnected) }) : "",
   });
 }
 function openHostConnect(ip: string) {
@@ -757,7 +788,9 @@ function openHostConnect(ip: string) {
     bookId,
     mode: "host",
     title: rec?.note || rec?.name || ip,
-    extra: rec?.lastPort ? `已自动填入上次成功端口 ${rec.lastPort}` : "端口未知？可先「深扫端口」找到它",
+    extra: rec?.lastPort
+      ? t("dm.hostExtraPort", { port: rec.lastPort })
+      : t("dm.hostExtraNoPort"),
   });
 }
 /** Open detail for a currently-connected device (edit note / disconnect). */
@@ -775,7 +808,7 @@ function openConnectedDetail(connectKey: string) {
     mode: "connected",
     connectKey,
     title: rec?.note || rec?.name || connectKey,
-    extra: "当前已连接 · 可修改备注或断开连接",
+    extra: t("dm.connectedExtra"),
   });
 }
 
@@ -788,7 +821,7 @@ async function refreshDevices() {
     renderCandidates();
     fetchNames(); // async; updates names when ready
   } catch (e) {
-    toast("获取设备列表失败: " + e, "err");
+    toast(t("toast.listFail", { e: String(e) }), "err");
   }
 }
 
@@ -820,14 +853,14 @@ async function probeHistory() {
       .join(", ");
     log(
       "info",
-      `历史在线检测：${results.length}/${targets.length} 应答` +
-        (results.length ? ` [应答 ${onlineDesc}]` : "") +
-        (offline.length ? ` [离线 ${offline.join(", ")}]` : "")
+      t("log.historyProbe", { ans: results.length, total: targets.length }) +
+        (results.length ? t("log.probeAnswered", { desc: onlineDesc }) : "") +
+        (offline.length ? t("log.probeOffline", { list: offline.join(", ") }) : "")
     );
   } catch (e) {
     onlineTargets = new Set(); // don't show stale "online" if the probe failed
     onlineMac = {};
-    log("err", "历史在线检测失败: " + e);
+    log("err", t("log.historyProbeFail", { e: String(e) }));
   }
   renderHistory();
 }
@@ -864,9 +897,7 @@ function renderCandidates() {
   const list = $("#found-list");
   $("#found-count").textContent = String(candidates.length);
   if (candidates.length === 0) {
-    list.innerHTML = `<div class="empty">${
-      scanning ? "扫描中…" : "尚未扫描。"
-    }</div>`;
+    list.innerHTML = `<div class="empty">${esc(scanning ? t("found.scanning") : t("found.empty"))}</div>`;
     return;
   }
   list.innerHTML = candidates
@@ -877,13 +908,13 @@ function renderCandidates() {
       const rec = mac ? book["mac:" + mac] : undefined;
       const isLastGood = rec?.lastPort === c.port;
       const action = connected
-        ? `<span class="badge badge-on">已连接</span>`
+        ? `<span class="badge badge-on">${esc(t("found.connectedBadge"))}</span>`
         : `<button class="btn btn-primary btn-sm" data-act="connect" data-target="${esc(
             c.target
-          )}">连接</button>`;
+          )}">${esc(t("btn.connect"))}</button>`;
       const sub = [
-        `<span class="badge badge-tcp">端口开放</span>`,
-        isLastGood ? `<span class="badge badge-star">⭐ 上次成功端口</span>` : "",
+        `<span class="badge badge-tcp">${esc(t("found.badgeOpen"))}</span>`,
+        isLastGood ? `<span class="badge badge-star">${esc(t("found.badgeLastGood"))}</span>` : "",
         note ? `<span class="muted">📝 ${esc(note)}</span>` : "",
       ]
         .filter(Boolean)
@@ -910,16 +941,15 @@ async function connectTarget(target: string, silent = false) {
       target,
       timeoutMs: settings.connectTimeout,
     });
-    log("cmd", `  ↳ ${(out.stdout || out.stderr || "(无输出)").trim()}`);
+    log("cmd", `  ↳ ${(out.stdout || out.stderr || t("log.noOutput")).trim()}`);
     // Verify the REAL status — an open port isn't always a working hdc device.
     const devs = await invoke<Device[]>("list_devices", { hdcPath: hdcPathArg() });
     const dev = devs.find((d) => d.connect_key === target);
     const s = (dev?.status || "").toLowerCase();
     if (/connected|ready/.test(s)) {
-      if (!silent) toast(`✅ 已连接 ${target}`, "ok");
+      if (!silent) toast(t("toast.connected", { target }), "ok");
     } else if (/unauth|authing/.test(s)) {
-      if (!silent)
-        toast(`${target} 已连上，但设备需要授权 —— 请在设备屏幕上点「允许调试」`, "info");
+      if (!silent) toast(t("toast.needAuth", { target }), "info");
     } else {
       // dead / non-hdc port — clean it up so it doesn't linger as Offline
       await invoke<CmdOutput>("disconnect_device", {
@@ -928,13 +958,16 @@ async function connectTarget(target: string, silent = false) {
       }).catch(() => {});
       if (!silent)
         toast(
-          `连接失败 ${target}：设备未就绪（${dev?.status || "无响应"}）。该端口可能不是 hdc 调试端口，或设备未开启无线调试。`,
+          t("toast.connectFailNotReady", {
+            target,
+            status: dev?.status || t("status.noResponse"),
+          }),
           "err"
         );
     }
     await refreshDevices();
   } catch (e) {
-    if (!silent) toast("连接失败: " + e, "err");
+    if (!silent) toast(t("toast.connectFail", { e: String(e) }), "err");
   }
 }
 
@@ -944,10 +977,10 @@ async function disconnectTarget(target: string) {
       hdcPath: hdcPathArg(),
       target,
     });
-    toast(`已断开 ${target}`, out.success ? "ok" : "info");
+    toast(t("toast.disconnected", { target }), out.success ? "ok" : "info");
     await refreshDevices();
   } catch (e) {
-    toast("断开失败: " + e, "err");
+    toast(t("toast.disconnectFail", { e: String(e) }), "err");
   }
 }
 
@@ -955,7 +988,7 @@ async function disconnectTarget(target: string) {
  *  if this is the hdc port (Connected, or Unauth = real device needing auth). */
 async function tryConnectQuiet(target: string): Promise<boolean> {
   try {
-    log("cmd", `hdc tconn ${target} (自动)`);
+    log("cmd", `hdc tconn ${target} ${t("log.auto")}`);
     const out = await invoke<CmdOutput>("connect_device", {
       hdcPath: hdcPathArg(),
       target,
@@ -964,7 +997,7 @@ async function tryConnectQuiet(target: string): Promise<boolean> {
     const devs = await invoke<Device[]>("list_devices", { hdcPath: hdcPathArg() });
     const dev = devs.find((d) => d.connect_key === target);
     const s = (dev?.status || "").toLowerCase();
-    log("cmd", `  ↳ ${(out.stdout || out.stderr || "").trim()} [状态: ${dev?.status || "无"}]`);
+    log("cmd", `  ↳ ${(out.stdout || out.stderr || "").trim()} [${t("log.statusTag")}: ${dev?.status || t("log.none")}]`);
     if (/connected|unauth|authing/.test(s)) return true; // real hdc port
     await invoke<CmdOutput>("disconnect_device", {
       hdcPath: hdcPathArg(),
@@ -999,13 +1032,13 @@ async function autoConnectCandidates() {
     const preferred = mac ? book["mac:" + mac]?.lastPort : undefined;
     if (preferred) {
       list.sort((a, b) => (b.port === preferred ? 1 : 0) - (a.port === preferred ? 1 : 0));
-      if (list[0]?.port === preferred) log("info", `${ip}: 优先尝试上次成功端口 ${preferred}`);
+      if (list[0]?.port === preferred) log("info", t("log.preferPort", { ip, port: preferred }));
     }
     let i = 0;
     for (const c of list) {
       if (stopRequested) break;
       i++;
-      txt.textContent = `自动连接 ${c.target} (${i}/${list.length}) …`;
+      txt.textContent = t("progress.autoConnect", { target: c.target, i, n: list.length });
       if (await tryConnectQuiet(c.target)) {
         connected++;
         break; // found this IP's hdc port; skip its other ports
@@ -1013,30 +1046,25 @@ async function autoConnectCandidates() {
     }
   }
   await refreshDevices();
-  if (connected > 0) toast(`✅ 自动连接成功 ${connected} 台设备`, "ok");
-  else toast("自动连接未成功，可在「扫描发现」里手动点连接", "info");
+  if (connected > 0) toast(t("toast.autoConnected", { n: connected }), "ok");
+  else toast(t("toast.autoConnectNone"), "info");
 }
 
 async function restartHdc() {
-  if (
-    !confirm(
-      "重启 hdc 服务会断开当前所有连接（之后可从历史/扫描重连），用于清理无效/卡死的连接。确定继续？"
-    )
-  )
-    return;
-  log("cmd", "hdc kill -r (重启服务)");
+  if (!confirm(t("confirm.restartHdc"))) return;
+  log("cmd", `hdc kill -r ${t("log.restartHdc")}`);
   try {
-    const msg = await invoke<string>("restart_hdc", { hdcPath: hdcPathArg() });
-    toast(msg || "hdc 服务已重启", "ok");
+    await invoke<string>("restart_hdc", { hdcPath: hdcPathArg() });
+    toast(t("toast.hdcRestarted"), "ok");
     setTimeout(refreshDevices, 1000);
   } catch (e) {
-    toast("重启失败: " + e, "err");
+    toast(t("toast.restartFail", { e: String(e) }), "err");
   }
 }
 
 async function enableWireless(connectKey: string) {
   const ok = confirm(
-    `将设备 ${connectKey} 切换到无线(TCP)模式，端口 ${settings.wirelessPort}。\n该操作会重启设备，确定继续？`
+    t("confirm.enableWireless", { key: connectKey, port: settings.wirelessPort })
   );
   if (!ok) return;
   try {
@@ -1045,10 +1073,10 @@ async function enableWireless(connectKey: string) {
       connectKey,
       port: settings.wirelessPort,
     });
-    toast(out.stdout || out.stderr || "已发送无线模式命令，设备将重启", "info");
+    toast(out.stdout || out.stderr || t("toast.wirelessSent"), "info");
     setTimeout(refreshDevices, 1500);
   } catch (e) {
-    toast("开启无线失败: " + e, "err");
+    toast(t("toast.wirelessFail", { e: String(e) }), "err");
   }
 }
 
@@ -1062,19 +1090,17 @@ function showBanner(kind: "firewall" | "broadcast") {
   const text = $("#discover-banner-text");
   const action = $<HTMLButtonElement>("#btn-banner-action");
   if (kind === "firewall") {
-    text.innerHTML =
-      "⚠ 广播无应答，且未放行 <b>UDP 8710 入站</b>。放行后会自动重试。";
-    action.textContent = "添加防火墙规则";
+    text.innerHTML = t("banner.firewall");
+    action.textContent = t("btn.addFirewall");
     action.onclick = addFirewallRule;
   } else {
-    text.innerHTML =
-      "⚠ 防火墙已放行但仍无应答 —— 此网络可能<b>不支持 UDP 广播</b>（VPN / 虚拟网卡 / 代理常见）。请改用「端口扫描」：填<b>目标 IP</b> + 端口范围。";
-    action.textContent = "切到端口扫描";
+    text.innerHTML = t("banner.broadcast");
+    action.textContent = t("btn.switchToScan");
     action.onclick = () => {
       ($("#ports-input") as HTMLInputElement).value = RECOMMENDED_RANGE;
       ($("#target-input") as HTMLInputElement).focus();
       hideBanner();
-      toast("已填入推荐端口段，请输入目标设备 IP 后点「端口扫描」", "info");
+      toast(t("toast.filledRange"), "info");
     };
   }
   $("#discover-banner").classList.remove("hidden");
@@ -1085,9 +1111,9 @@ async function discoverDevices() {
   const btn = $<HTMLButtonElement>("#btn-discover");
   btn.disabled = true;
   const label = btn.querySelector(".btn-label")!;
-  label.innerHTML = `<span class="spin"></span>发现中`;
+  label.innerHTML = `<span class="spin"></span>${esc(t("progress.discovering"))}`;
   hideBanner();
-  log("cmd", "hdc discover (广播发现)");
+  log("cmd", `hdc discover ${t("log.discover")}`);
   try {
     const res = await invoke<DiscoverResult>("discover_devices", {
       hdcPath: hdcPathArg(),
@@ -1101,18 +1127,18 @@ async function discoverDevices() {
       }
       candidates = [...set.values()];
       renderCandidates();
-      toast(`广播发现 ${res.targets.length} 台设备`, "ok");
+      toast(t("toast.discovered", { n: res.targets.length }), "ok");
     } else {
       // hdc always prints the firewall reminder, so decide via the real rule state.
       const hasRule = await invoke<boolean>("firewall_rule_exists").catch(() => false);
       showBanner(hasRule ? "broadcast" : "firewall");
-      toast("广播发现：未找到设备", "info");
+      toast(t("toast.discoverNone"), "info");
     }
   } catch (e) {
-    toast("广播发现失败: " + e, "err");
+    toast(t("toast.discoverFail", { e: String(e) }), "err");
   } finally {
     btn.disabled = false;
-    label.textContent = "📡 广播发现";
+    label.textContent = t("btn.discover");
   }
 }
 
@@ -1120,17 +1146,17 @@ async function addFirewallRule() {
   const btn = $<HTMLButtonElement>("#btn-banner-action");
   const prev = btn.textContent;
   btn.disabled = true;
-  btn.textContent = "请在 UAC 中确认…";
+  btn.textContent = t("btn.uacConfirm");
   try {
-    const msg = await invoke<string>("add_firewall_rule");
-    toast(msg, "ok");
+    await invoke<string>("add_firewall_rule");
+    toast(t("toast.firewallAdded"), "ok");
     hideBanner();
     setTimeout(discoverDevices, 600); // retry discovery
   } catch (e) {
-    toast("" + e, "err");
+    toast(String(e), "err");
   } finally {
     btn.disabled = false;
-    btn.textContent = prev || "添加防火墙规则";
+    btn.textContent = prev || t("btn.addFirewall");
   }
 }
 
@@ -1141,9 +1167,9 @@ function renderHosts() {
   const shown = onlyMobile ? hosts.filter((h) => h.likely_mobile) : hosts;
   $("#host-count").textContent = String(shown.length);
   if (shown.length === 0) {
-    list.innerHTML = `<div class="empty">${
-      hosts.length === 0 ? "点击「扫描局域网设备」列出局域网内的设备。" : "没有手机/平板候选，取消勾选可查看全部设备。"
-    }</div>`;
+    list.innerHTML = `<div class="empty">${esc(
+      hosts.length === 0 ? t("host.empty") : t("host.emptyNoMobile")
+    )}</div>`;
     return;
   }
   list.innerHTML = shown
@@ -1155,12 +1181,12 @@ function renderHosts() {
       // Show the scanned hostname as a chip unless it's already the title.
       const showHost = h.hostname && h.hostname !== title;
       const sub = [
-        `<span class="badge ${h.likely_mobile ? "badge-on" : "badge-off"}">${
-          h.likely_mobile ? "手机/平板候选" : "普通设备"
-        }</span>`,
+        `<span class="badge ${h.likely_mobile ? "badge-on" : "badge-off"}">${esc(
+          h.likely_mobile ? t("host.badgeMobile") : t("host.badgeNormal")
+        )}</span>`,
         showHost ? `<span class="badge badge-note">🏷 ${esc(h.hostname)}</span>` : "",
-        rec?.lastConnected ? `<span class="badge badge-note">📒 已连过</span>` : "",
-        rec?.lastPort ? `<span class="badge badge-star">⭐ 上次端口 ${rec.lastPort}</span>` : "",
+        rec?.lastConnected ? `<span class="badge badge-note">${esc(t("host.badgeKnown"))}</span>` : "",
+        rec?.lastPort ? `<span class="badge badge-star">${esc(t("host.badgeLastPort", { port: rec.lastPort }))}</span>` : "",
         known || showHost ? `<span class="muted">${esc(h.ip)}</span>` : "",
         `<span class="muted">${esc(h.mac)}</span>`,
         rec?.name && rec?.note ? `<span class="muted">${esc(rec.name)}</span>` : "",
@@ -1175,8 +1201,8 @@ function renderHosts() {
           <div class="dev-sub">${sub}</div>
         </div>
         <div class="dev-actions">
-          <button class="btn btn-primary btn-sm" data-act="host-connect" data-ip="${esc(h.ip)}">连接</button>
-          <button class="btn btn-ghost btn-sm" data-act="deepscan" data-ip="${esc(h.ip)}">深扫端口</button>
+          <button class="btn btn-primary btn-sm" data-act="host-connect" data-ip="${esc(h.ip)}">${esc(t("btn.connect"))}</button>
+          <button class="btn btn-ghost btn-sm" data-act="deepscan" data-ip="${esc(h.ip)}">${esc(t("btn.deepScanPort"))}</button>
         </div>
       </div>`;
     })
@@ -1187,13 +1213,13 @@ async function discoverHosts() {
   if (scanning || scanAllRunning) return;
   const sub = selectedSubnet();
   if (!sub) {
-    toast("请选择有效的网络接口", "err");
+    toast(t("toast.selectIface"), "err");
     return;
   }
   const btn = $<HTMLButtonElement>("#btn-host-scan");
   btn.disabled = true;
   const label = btn.querySelector(".btn-label")!;
-  label.innerHTML = `<span class="spin"></span>扫描中`;
+  label.innerHTML = `<span class="spin"></span>${esc(t("progress.scanning"))}`;
   try {
     hosts = await invoke<HostInfo[]>("discover_hosts", {
       network: sub.network,
@@ -1201,25 +1227,25 @@ async function discoverHosts() {
     });
     renderHosts();
     const mobile = hosts.filter((h) => h.likely_mobile).length;
-    toast(`发现 ${hosts.length} 台设备，其中 ${mobile} 台手机/平板候选`, "ok");
+    toast(t("toast.hostScanResult", { n: hosts.length, mobile }), "ok");
     // Diagnostic: how many devices announced a resolvable name (mDNS/DNS/NetBIOS).
     const named = hosts.filter((h) => h.hostname);
     log(
       "info",
-      `设备名解析：${named.length}/${hosts.length} 台拿到名称` +
-        (named.length ? ` [${named.map((h) => `${h.ip}=${h.hostname}`).join(", ")}]` : "（其余设备未在网络上广播名称）")
+      t("log.nameResolve", { named: named.length, total: hosts.length }) +
+        (named.length ? ` [${named.map((h) => `${h.ip}=${h.hostname}`).join(", ")}]` : t("log.nameResolveNone"))
     );
   } catch (e) {
-    toast("扫描设备失败: " + e, "err");
+    toast(t("toast.hostScanFail", { e: String(e) }), "err");
   } finally {
     btn.disabled = false;
-    label.textContent = "扫描局域网设备";
+    label.textContent = t("btn.hostScan");
   }
 }
 
 function deepScanHost(ip: string) {
   if (scanning || scanAllRunning) {
-    toast("正在扫描中，请稍候…", "info");
+    toast(t("toast.scanningWait"), "info");
     return;
   }
   ($("#target-input") as HTMLInputElement).value = ip;
@@ -1234,18 +1260,18 @@ async function scanAll() {
     scanAllAbort = true;
     stopRequested = true;
     invoke("cancel_scan").catch(() => {});
-    toast("已请求停止", "info");
+    toast(t("toast.stopRequested"), "info");
     return;
   }
   if (scanning) return;
   const sub = selectedSubnet();
   if (!sub) {
-    toast("请选择有效的网络接口", "err");
+    toast(t("toast.selectIface"), "err");
     return;
   }
   const targets = hosts.filter((h) => h.likely_mobile);
   if (targets.length === 0) {
-    toast("没有手机/平板候选，请先「扫描局域网设备」", "err");
+    toast(t("toast.noMobileScanFirst"), "err");
     return;
   }
 
@@ -1256,7 +1282,7 @@ async function scanAll() {
   candidates = [];
   renderCandidates();
   const btn = $<HTMLButtonElement>("#btn-scan-all");
-  btn.textContent = "停止";
+  btn.textContent = t("btn.stop");
   btn.classList.add("btn-danger");
   const wrap = $("#host-progress");
   wrap.classList.remove("hidden");
@@ -1266,7 +1292,12 @@ async function scanAll() {
     if (scanAllAbort) break;
     i++;
     $("#host-bar").style.width = Math.round((i / targets.length) * 100) + "%";
-    $("#host-progress-text").textContent = `深扫 ${h.ip} (${i}/${targets.length}) · 已发现 ${candidates.length}`;
+    $("#host-progress-text").textContent = t("progress.deepScan", {
+      ip: h.ip,
+      i,
+      n: targets.length,
+      found: candidates.length,
+    });
     try {
       const found = await invoke<Candidate[]>("start_scan", {
         network: sub.network,
@@ -1287,18 +1318,20 @@ async function scanAll() {
 
   $("#host-bar").style.width = "100%";
   if (!scanAllAbort && candidates.length > 0) {
-    $("#host-progress-text").textContent = "正在自动连接发现的端口…";
+    $("#host-progress-text").textContent = t("progress.autoConnecting");
     await autoConnectCandidates();
   } else {
     await refreshDevices();
   }
   scanning = false;
   scanAllRunning = false;
-  btn.textContent = "深扫全部候选";
+  btn.textContent = t("btn.scanAll");
   btn.classList.remove("btn-danger");
   setTimeout(() => wrap.classList.add("hidden"), 1000);
   toast(
-    scanAllAbort ? `已停止，发现 ${candidates.length} 个端口` : `深扫完成，发现 ${candidates.length} 个端口`,
+    scanAllAbort
+      ? t("toast.deepScanStopped", { n: candidates.length })
+      : t("toast.deepScanDone", { n: candidates.length }),
     "ok"
   );
 }
@@ -1311,7 +1344,7 @@ async function doScan() {
   const network = opt?.dataset.network;
   const prefix = opt?.dataset.prefix;
   if (!network || !prefix) {
-    toast("请选择有效的网络接口", "err");
+    toast(t("toast.selectIface"), "err");
     return;
   }
   let portSpec = ($("#ports-input") as HTMLInputElement).value.trim() || settings.ports;
@@ -1323,7 +1356,7 @@ async function doScan() {
     const list = portSpec.split(/[,，\s]+/).filter(Boolean);
     if (list.length <= 2) {
       portSpec = RECOMMENDED_RANGE;
-      toast(`目标深扫：已使用推荐端口段 ${RECOMMENDED_RANGE}`, "info");
+      toast(t("toast.targetDeepScan", { range: RECOMMENDED_RANGE }), "info");
     }
   }
 
@@ -1333,14 +1366,20 @@ async function doScan() {
   const btn = $<HTMLButtonElement>("#btn-scan");
   btn.disabled = true;
   $<HTMLButtonElement>("#btn-discover").disabled = true;
-  btn.querySelector(".btn-label")!.innerHTML = `<span class="spin"></span>扫描中`;
+  btn.querySelector(".btn-label")!.innerHTML = `<span class="spin"></span>${esc(t("progress.scanning"))}`;
   const wrap = $("#scan-progress-wrap");
   wrap.classList.remove("hidden");
   $("#scan-bar").style.width = "0%";
-  $("#scan-progress-text").textContent = "准备中…";
+  $("#scan-progress-text").textContent = t("progress.preparing");
   renderCandidates();
 
-  log("cmd", `端口扫描 ${targetIp ? `目标 ${targetIp}` : `${network}/${prefix}`} 端口=${portSpec}`);
+  log(
+    "cmd",
+    t("log.portScan", {
+      scope: targetIp ? t("log.scopeTarget", { ip: targetIp }) : `${network}/${prefix}`,
+      ports: portSpec,
+    })
+  );
   try {
     candidates = await invoke<Candidate[]>("start_scan", {
       network,
@@ -1352,18 +1391,18 @@ async function doScan() {
     });
     await refreshDevices(); // also re-renders candidates
     if (stopRequested) {
-      toast(`已停止，发现 ${candidates.length} 个开放端口`, "info");
+      toast(t("toast.scanStopped", { n: candidates.length }), "info");
     } else {
-      toast(`扫描完成，发现 ${candidates.length} 个开放端口，正在自动连接…`, "ok");
+      toast(t("toast.scanDone", { n: candidates.length }), "ok");
       await autoConnectCandidates();
     }
   } catch (e) {
-    toast("扫描失败: " + e, "err");
+    toast(t("toast.scanFail", { e: String(e) }), "err");
   } finally {
     scanning = false;
     btn.disabled = false;
     $<HTMLButtonElement>("#btn-discover").disabled = false;
-    btn.querySelector(".btn-label")!.textContent = "端口扫描";
+    btn.querySelector(".btn-label")!.textContent = t("btn.scan");
     setTimeout(() => wrap.classList.add("hidden"), 1200);
   }
 }
@@ -1407,18 +1446,19 @@ function applySettings() {
       parseInt(($("#set-connect-timeout") as HTMLInputElement).value, 10) ||
       DEFAULTS.connectTimeout,
     theme: settings.theme, // theme is applied live via the picker, not the form
+    lang: settings.lang, // language is applied live via the picker, not the form
   };
   saveSettings(settings);
   ($("#ports-input") as HTMLInputElement).value = settings.ports;
   // Apply launch-on-startup (registry write; no elevation needed).
   const autostart = ($("#set-autostart") as HTMLInputElement).checked;
   invoke("set_autostart", { enabled: autostart })
-    .then(() => log("ok", `开机自启动已${autostart ? "开启" : "关闭"}`))
-    .catch((e) => toast("设置开机自启动失败: " + e, "err"));
+    .then(() => log("ok", t("log.autostartSet", { state: autostart ? t("status.on") : t("status.off") })))
+    .catch((e) => toast(t("toast.autostartFail", { e: String(e) }), "err"));
   closeSettings();
   detectHdc();
   startPolling();
-  toast("设置已保存", "ok");
+  toast(t("toast.settingsSaved"), "ok");
 }
 
 // ---------- Wire up ----------
@@ -1431,23 +1471,23 @@ function bindEvents() {
   $("#btn-scan-all").addEventListener("click", scanAll);
   $("#only-mobile").addEventListener("change", renderHosts);
   $("#btn-history-refresh").addEventListener("click", () => {
-    toast("正在刷新在线状态…", "info");
+    toast(t("toast.refreshingOnline"), "info");
     pollStatus();
   });
   $("#btn-device-refresh").addEventListener("click", async () => {
-    toast("正在刷新已连接设备…", "info");
+    toast(t("toast.refreshingDevices"), "info");
     await refreshDevices();
     await probeHistory();
   });
   $("#btn-restart-hdc").addEventListener("click", restartHdc);
   $("#btn-connect-manual").addEventListener("click", () => {
     const input = $("#manual-input") as HTMLInputElement;
-    const t = input.value.trim();
-    if (!t) {
-      toast("请输入 IP:端口", "err");
+    const val = input.value.trim();
+    if (!val) {
+      toast(t("toast.enterIpPort"), "err");
       return;
     }
-    connectTarget(t.includes(":") ? t : `${t}:${settings.wirelessPort}`);
+    connectTarget(val.includes(":") ? val : `${val}:${settings.wirelessPort}`);
     input.value = "";
   });
   $("#manual-input").addEventListener("keydown", (e) => {
@@ -1464,9 +1504,9 @@ function bindEvents() {
     const text = logs.map((e) => `${ts(e.t)} [${e.level}] ${e.msg}`).join("\n");
     try {
       await navigator.clipboard.writeText(text);
-      toast("日志已复制到剪贴板", "ok");
+      toast(t("toast.logCopied"), "ok");
     } catch (_) {
-      toast("复制失败", "err");
+      toast(t("toast.logCopyFail"), "err");
     }
   });
   $("#log-modal").addEventListener("click", (e) => {
@@ -1534,7 +1574,7 @@ async function bindBackendEvents() {
     const { phase, scanned, total, found } = e.payload;
     const pct = total > 0 ? Math.round((scanned / total) * 100) : 0;
     $("#scan-bar").style.width = pct + "%";
-    $("#scan-progress-text").textContent = `${phase} · ${scanned}/${total} · 发现 ${found}`;
+    $("#scan-progress-text").textContent = t("progress.scanProgress", { phase, scanned, total, found });
   });
   await listen<Candidate>("scan-found", (e) => {
     if (!candidates.some((c) => c.target === e.payload.target)) {
@@ -1547,13 +1587,60 @@ async function bindBackendEvents() {
   await listen<boolean>("autostart-changed", (e) => {
     const el = $("#set-autostart") as HTMLInputElement | null;
     if (el) el.checked = e.payload;
-    toast(`开机自启动已${e.payload ? "开启" : "关闭"}（托盘）`, "ok");
+    toast(t("toast.autostartTray", { state: e.payload ? t("status.on") : t("status.off") }), "ok");
   });
+}
+
+// ---------- Language ----------
+/** Keep both language dropdowns (topbar + settings) showing the active language. */
+function syncLangSelectors() {
+  for (const id of ["#lang-select", "#set-lang"]) {
+    const sel = document.querySelector<HTMLSelectElement>(id);
+    if (sel) sel.value = settings.lang;
+  }
+}
+/** Fill both language dropdowns and wire their change handlers. */
+function setupLanguagePickers() {
+  for (const id of ["#lang-select", "#set-lang"]) {
+    const sel = document.querySelector<HTMLSelectElement>(id);
+    if (!sel) continue;
+    sel.innerHTML = LANGS.map((l) => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
+    sel.value = settings.lang;
+    sel.addEventListener("change", () => changeLanguage(sel.value as Lang));
+  }
+}
+/** Switch the active language and re-render everything (static + dynamic). */
+async function changeLanguage(l: Lang) {
+  if (!isLang(l)) return;
+  setLang(l);
+  settings.lang = l;
+  saveSettings(settings);
+  syncLangSelectors();
+  applyStaticTranslations(); // labels, buttons, placeholders, titles, document.title
+  // Re-render dynamic content that was generated through t().
+  renderThemePickers();
+  renderDevices(); // also re-renders history
+  renderCandidates();
+  renderHosts();
+  // Rebuild interface option labels, preserving the current selection.
+  const sub = selectedSubnet();
+  await loadInterfaces();
+  if (sub) {
+    const sel = $<HTMLSelectElement>("#iface-select");
+    const match = Array.from(sel.options).find(
+      (o) => o.dataset.network === sub.network && o.dataset.prefix === String(sub.prefix)
+    );
+    if (match) match.selected = true;
+  }
+  detectHdc(); // re-localize the hdc status pill/detail
 }
 
 async function init() {
   loadBook();
-  log("info", "应用启动");
+  setLang(settings.lang);
+  applyStaticTranslations();
+  setupLanguagePickers();
+  log("info", t("log.appStart"));
   applyTheme(settings.theme); // sync theme + render picker grid
   ($("#ports-input") as HTMLInputElement).value = settings.ports;
   bindEvents();
