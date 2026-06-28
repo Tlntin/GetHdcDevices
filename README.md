@@ -50,16 +50,9 @@ It ships as a single native `.exe` / `.msi` (~5 MB) with low memory usage, built
 - 🚀 **Launch on startup** — optionally start minimized to the tray on Windows login.
 - ⚙️ **Settings** — custom `hdc` path (auto-detected by default), scan ports, wireless port, timeouts, and concurrency (saved locally).
 
-## How wireless `hdc` connection works
+## Discovery & connection
 
-All that's needed is for the device to enter **TCP listening mode** on the LAN — **USB is not required**. There are two ways to get it there:
-
-- **Enable on the device (no USB):** turn on wireless debugging under **Settings → System → Developer options → Wireless debugging**. The device then listens on a **system-assigned port** (usually a random high port) on the same LAN.
-- **Enable once over USB:** with the device connected via USB, run `hdc tmode port <port>` (the **Enable wireless** button). The device reboots into TCP listening mode. Handy when you'd rather not toggle it on the device itself.
-
-Once the device is listening on the LAN, run `hdc tconn <device-ip>:<port>` from the PC to connect (the app's **Connect** button).
-
-Two ways to find a device:
+Get the device into **TCP listening mode** on the LAN (**no USB required**): enable it under **Developer options → Wireless debugging**, or connect over USB once and hit **Enable wireless** (`hdc tmode port`). The port is system-assigned (random), so the app finds it one of two ways, then connects via `hdc tconn`:
 
 | Method | Mechanism | Notes |
 | --- | --- | --- |
