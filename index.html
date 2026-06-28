@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HDC 无线设备扫描器</title>
+    <script>
+      // Apply saved theme before paint to avoid a flash of the wrong theme.
+      try {
+        var s = JSON.parse(localStorage.getItem("gethdc.settings") || "{}");
+        document.documentElement.setAttribute("data-theme", s.theme || "eclipse");
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "eclipse");
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Title bar -->
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">HDC</div>
+          <div class="brand-text">
+            <h1>无线设备扫描器</h1>
+            <span class="subtitle">扫描局域网 · 自动连接 HarmonyOS 设备</span>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <div id="hdc-status" class="hdc-pill pill-warn" title="hdc 状态">
+            <span class="dot"></span>
+            <span id="hdc-status-text">检测 hdc 中…</span>
+          </div>
+          <div class="pop-wrap">
+            <button id="btn-theme" class="icon-btn" title="切换主题">◐</button>
+            <div id="theme-pop" class="popover hidden">
+              <div class="pop-title">主题外观</div>
+              <div id="theme-pop-grid" class="theme-grid"></div>
+            </div>
+          </div>
+          <button id="btn-log" class="icon-btn" title="调试日志">🗒</button>
+          <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+        </div>
+      </header>
+
+      <main class="content">
+        <!-- Command bar -->
+        <section class="card hero">
+          <div class="card-head">
+            <h2>发现设备</h2>
+            <span class="muted small" id="scan-hint">优先用「广播发现」（hdc 原生，自动拿到真实端口）。端口未知时：填「目标 IP」+端口范围，对单台设备深度扫描</span>
+          </div>
+          <div class="scan-controls">
+            <label class="field grow">
+              <span>网络接口 / 网段</span>
+              <select id="iface-select"></select>
+            </label>
+            <label class="field field-sm">
+              <span>扫描端口 / 范围</span>
+              <input id="ports-input" type="text" placeholder="10178, 32768-60999" />
+            </label>
+            <label class="field field-sm">
+              <span>目标 IP（可选）</span>
+              <input id="target-input" type="text" placeholder="192.168.3.155" />
+            </label>
+            <button id="btn-discover" class="btn btn-primary" title="hdc 原生广播发现">
+              <span class="btn-label">📡 广播发现</span>
+            </button>
+            <button id="btn-scan" class="btn btn-ghost" title="TCP 端口段扫描">
+              <span class="btn-label">端口扫描</span>
+            </button>
+            <button id="btn-refresh" class="btn btn-ghost" title="刷新已连接设备">刷新</button>
+          </div>
+
+          <div id="discover-banner" class="banner hidden">
+            <span class="banner-text" id="discover-banner-text"></span>
+            <button id="btn-banner-action" class="btn btn-primary btn-sm"></button>
+          </div>
+
+          <div id="scan-progress-wrap" class="progress-wrap hidden">
+            <div class="progress-track"><div id="scan-bar" class="progress-bar"></div></div>
+            <span id="scan-progress-text" class="muted small"></span>
+            <button id="btn-stop-scan" class="btn btn-danger btn-sm">停止</button>
+          </div>
+        </section>
+
+        <!-- Dashboard: discovery (main) + device state (side) -->
+        <div class="dash">
+          <div class="dash-main">
+            <!-- LAN host discovery -->
+            <section class="card">
+              <div class="card-head">
+                <h2>局域网设备 <span id="host-count" class="count-badge">0</span></h2>
+                <span class="muted small">📱 手机/平板候选（随机 MAC）排在最前。点某台「深扫端口」找它的 hdc 端口</span>
+              </div>
+              <div class="scan-controls compact-controls">
+                <button id="btn-host-scan" class="btn btn-primary">
+                  <span class="btn-label">扫描局域网设备</span>
+                </button>
+                <button id="btn-scan-all" class="btn btn-ghost">深扫全部候选</button>
+                <label class="chk">
+                  <input type="checkbox" id="only-mobile" checked /> 只看手机/平板候选
+                </label>
+              </div>
+              <div id="host-progress" class="progress-wrap hidden">
+                <div class="progress-track"><div id="host-bar" class="progress-bar"></div></div>
+                <span id="host-progress-text" class="muted small"></span>
+              </div>
+              <div id="host-list" class="list">
+                <div class="empty">点击「扫描局域网设备」列出局域网内的设备。</div>
+              </div>
+            </section>
+
+            <!-- Scan results -->
+            <section class="card">
+              <div class="card-head">
+                <h2>扫描发现 <span id="found-count" class="count-badge">0</span></h2>
+              </div>
+              <span class="muted small head-note">端口开放的主机，点击「连接」尝试加入</span>
+              <div id="found-list" class="list">
+                <div class="empty">尚未扫描。</div>
+              </div>
+            </section>
+          </div>
+
+          <div class="dash-side">
+            <!-- Manual connect -->
+            <section class="card compact">
+              <div class="card-head">
+                <h2>手动连接</h2>
+              </div>
+              <div class="manual-row">
+                <label class="field grow">
+                  <span>IP:端口</span>
+                  <input id="manual-input" type="text" placeholder="192.168.3.50:10178" />
+                </label>
+                <button id="btn-connect-manual" class="btn btn-primary">连接</button>
+              </div>
+            </section>
+
+            <!-- Connected devices -->
+            <section class="card">
+              <div class="card-head">
+                <h2>已连接设备 <span id="device-count" class="count-badge">0</span></h2>
+                <button id="btn-device-refresh" class="btn btn-ghost btn-sm" style="margin-left:auto" title="刷新已连接设备">刷新</button>
+                <button id="btn-restart-hdc" class="btn btn-ghost btn-sm" title="重启 hdc 服务，清理无效/卡死的连接">重置 hdc</button>
+              </div>
+              <span class="muted small head-note">当前在连的设备 · 点设备查看详情 · 每 10 秒自动刷新</span>
+              <div id="device-list" class="list">
+                <div class="empty">暂无在连设备。扫描端口后会自动尝试连接。</div>
+              </div>
+            </section>
+
+            <!-- History devices -->
+            <section class="card">
+              <div class="card-head">
+                <h2>历史连接设备 <span id="history-count" class="count-badge">0</span></h2>
+                <button id="btn-history-refresh" class="btn btn-ghost btn-sm" style="margin-left:auto">刷新在线状态</button>
+              </div>
+              <span class="muted small head-note">连过但当前未连接，🟢在线即可点「连接」重试（按 MAC 记忆）</span>
+              <div id="history-list" class="list">
+                <div class="empty">暂无历史设备。</div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Settings modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-head">
+          <h2>设置</h2>
+          <button id="btn-settings-close" class="icon-btn">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <span>主题外观</span>
+            <div id="theme-grid" class="theme-grid"></div>
+          </div>
+          <label class="field">
+            <span>hdc 可执行文件路径（留空自动检测）</span>
+            <input id="set-hdc-path" type="text" placeholder="自动检测 OpenHarmony SDK / PATH" />
+          </label>
+          <div class="field-grid">
+            <label class="field">
+              <span>默认扫描端口</span>
+              <input id="set-ports" type="text" placeholder="10178" />
+            </label>
+            <label class="field">
+              <span>无线模式端口 (tmode)</span>
+              <input id="set-wireless-port" type="number" placeholder="10178" />
+            </label>
+            <label class="field">
+              <span>连接超时 (ms)</span>
+              <input id="set-timeout" type="number" placeholder="400" />
+            </label>
+            <label class="field">
+              <span>并发数</span>
+              <input id="set-concurrency" type="number" placeholder="256" />
+            </label>
+            <label class="field">
+              <span>在线检测间隔（秒，0=关闭）</span>
+              <input id="set-poll" type="number" placeholder="10" />
+            </label>
+            <label class="field">
+              <span>hdc 连接超时 (ms)</span>
+              <input id="set-connect-timeout" type="number" placeholder="2000" />
+            </label>
+          </div>
+          <label class="chk" style="margin-top:6px">
+            <input type="checkbox" id="set-autostart" /> 开机自启动（登录 Windows 后自动在托盘后台启动）
+          </label>
+          <div id="hdc-detail" class="hdc-detail muted small"></div>
+        </div>
+        <div class="modal-foot">
+          <button id="btn-redetect" class="btn btn-ghost">重新检测 hdc</button>
+          <button id="btn-settings-save" class="btn btn-primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Device detail / connect modal -->
+    <div id="device-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-head">
+          <h2 id="dm-title">设备详情</h2>
+          <button id="dm-close" class="icon-btn">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <span>设备名</span>
+            <div id="dm-name" class="dm-ro"></div>
+          </div>
+          <div class="field-grid">
+            <label class="field">
+              <span>IP 地址</span>
+              <input id="dm-ip" type="text" placeholder="192.168.3.x" />
+            </label>
+            <label class="field">
+              <span>端口（连过会自动填上次端口）</span>
+              <input id="dm-port" type="text" placeholder="如 38789" />
+            </label>
+          </div>
+          <div class="field">
+            <span>MAC</span>
+            <div id="dm-mac" class="dm-ro"></div>
+          </div>
+          <label class="field">
+            <span>备注（自定义名称，绑定 MAC）</span>
+            <input id="dm-note" type="text" placeholder="给这台设备起个名字" />
+          </label>
+          <div id="dm-extra" class="muted small"></div>
+        </div>
+        <div class="modal-foot">
+          <button id="dm-delete" class="btn btn-ghost">删除</button>
+          <span style="flex:1"></span>
+          <button id="dm-save" class="btn btn-ghost">保存</button>
+          <button id="dm-connect" class="btn btn-primary">连接</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Debug log modal -->
+    <div id="log-modal" class="modal-overlay hidden">
+      <div class="modal modal-lg">
+        <div class="modal-head">
+          <h2>调试日志</h2>
+          <div style="display:flex; gap:8px; align-items:center">
+            <button id="btn-log-copy" class="btn btn-ghost btn-sm">复制</button>
+            <button id="btn-log-clear" class="btn btn-ghost btn-sm">清空</button>
+            <button id="btn-log-close" class="icon-btn">✕</button>
+          </div>
+        </div>
+        <div id="log-body" class="log-body"></div>
+      </div>
+    </div>
+
+    <div id="toast-area" class="toast-area"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
