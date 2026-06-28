@@ -979,6 +979,9 @@ async function disconnectTarget(target: string) {
     });
     toast(t("toast.disconnected", { target }), out.success ? "ok" : "info");
     await refreshDevices();
+    // Re-probe immediately: a manual disconnect just moved this device to
+    // history, so refresh its online state now instead of waiting for the poll.
+    await probeHistory();
   } catch (e) {
     toast(t("toast.disconnectFail", { e: String(e) }), "err");
   }
