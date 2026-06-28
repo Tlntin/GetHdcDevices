@@ -58,6 +58,7 @@ Get the device into **TCP listening mode** on the LAN (**no USB required**): ena
 | --- | --- | --- |
 | **Broadcast discovery** (recommended) | `hdc discover` over UDP — the device reports its real `IP:port` | Needs inbound UDP 8710 (one-click rule). Same approach as DevEco Studio; most reliable. |
 | **Port scanning** | Concurrent TCP probes for open ports | Whole-subnet brute scans of large ranges are **not viable** (devices drop closed ports/ICMP). Use **target IP + range** for one device. Open ports are candidates only — `hdc tconn` is the source of truth. |
+| **Manual connect** | Type `IP:port` directly → `hdc tconn` | Fastest when you already know the device's IP and port; no discovery needed. History devices also remember their last IP:port by MAC. |
 
 ## How `hdc` is located
 
