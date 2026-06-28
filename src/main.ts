@@ -1187,7 +1187,9 @@ function renderHosts() {
         showHost ? `<span class="badge badge-note">🏷 ${esc(h.hostname)}</span>` : "",
         rec?.lastConnected ? `<span class="badge badge-note">${esc(t("host.badgeKnown"))}</span>` : "",
         rec?.lastPort ? `<span class="badge badge-star">${esc(t("host.badgeLastPort", { port: rec.lastPort }))}</span>` : "",
-        known || showHost ? `<span class="muted">${esc(h.ip)}</span>` : "",
+        // Show the IP whenever the title is a name (not the IP itself), so a
+        // named device always exposes its address too.
+        title !== h.ip ? `<span class="muted">${esc(h.ip)}</span>` : "",
         `<span class="muted">${esc(h.mac)}</span>`,
         rec?.name && rec?.note ? `<span class="muted">${esc(rec.name)}</span>` : "",
       ]
