@@ -1592,22 +1592,18 @@ async function bindBackendEvents() {
 }
 
 // ---------- Language ----------
-/** Keep both language dropdowns (topbar + settings) showing the active language. */
+/** Keep the Settings language dropdown showing the active language. */
 function syncLangSelectors() {
-  for (const id of ["#lang-select", "#set-lang"]) {
-    const sel = document.querySelector<HTMLSelectElement>(id);
-    if (sel) sel.value = settings.lang;
-  }
+  const sel = document.querySelector<HTMLSelectElement>("#set-lang");
+  if (sel) sel.value = settings.lang;
 }
-/** Fill both language dropdowns and wire their change handlers. */
+/** Fill the Settings language dropdown and wire its change handler. */
 function setupLanguagePickers() {
-  for (const id of ["#lang-select", "#set-lang"]) {
-    const sel = document.querySelector<HTMLSelectElement>(id);
-    if (!sel) continue;
-    sel.innerHTML = LANGS.map((l) => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
-    sel.value = settings.lang;
-    sel.addEventListener("change", () => changeLanguage(sel.value as Lang));
-  }
+  const sel = document.querySelector<HTMLSelectElement>("#set-lang");
+  if (!sel) return;
+  sel.innerHTML = LANGS.map((l) => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
+  sel.value = settings.lang;
+  sel.addEventListener("change", () => changeLanguage(sel.value as Lang));
 }
 /** Switch the active language and re-render everything (static + dynamic). */
 async function changeLanguage(l: Lang) {

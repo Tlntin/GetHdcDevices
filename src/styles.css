@@ -556,21 +556,6 @@ select {
   cursor: pointer;
 }
 
-/* Compact language picker in the topbar. */
-.lang-select {
-  height: 36px;
-  padding: 0 10px;
-  border-radius: 10px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 13px;
-  max-width: 150px;
-}
-.lang-select:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
 /* Full-width language picker inside the Settings modal. */
 .lang-select-full {
   width: 100%;
