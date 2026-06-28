@@ -28,7 +28,7 @@ It ships as a single native `.exe` / `.msi` (~5 MB) with low memory usage, built
 
 <div align="center">
 
-![GetHdcDevices — main window](img/screen-zh.png)
+![GetHdcDevices — main window](img/screen-en.png)
 
 <sub>Main window — discover (broadcast / port scan), one-click connect, and connected / history device management.</sub>
 
