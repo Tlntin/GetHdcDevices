@@ -43,12 +43,13 @@ It ships as a single native `.exe` / `.msi` (~5 MB) with low memory usage, built
 - 📋 **Connected devices** — parses `hdc list targets -v`, showing connection type (USB/TCP) and status, with auto-refresh every 10 s.
 - 📶 **Enable wireless mode** — runs `hdc tmode port <port>` on a USB-connected device (reboots it into TCP listening mode).
 - 🧠 **Device memory & history** — bind custom notes/names to a device's MAC; reconnect history devices when they come back online (🟢).
+- 🔁 **Follow IP changes by MAC** — when DHCP gives a history device a new IP (same MAC, same port), the app finds it via ARP (with an occasional subnet sweep), verifies it with a real `hdc tconn` handshake, then disconnects that check and just updates the saved address (it shows up as 🟢 connectable; connecting stays your call). On by default; toggle in Settings.
 - ⌨️ **Manual connect** — type an `IP:port` directly.
 - 🎨 **Themes** — 4 modern palettes (eclipse / carbon / daybreak / mist), light & dark, with an instant no-flash theme switcher.
 - 🌐 **Multilingual UI** — English, Simplified Chinese, and Hong Kong Traditional Chinese, switchable from a dropdown. The system language is auto-detected on first launch (falls back to English).
 - 🖥️ **System tray** — closing the window minimizes to the tray; the tray menu offers Show / Scan / Autostart / Quit, and a left-click reopens the window.
 - 🚀 **Launch on startup** — optionally start minimized to the tray on Windows login.
-- ⚙️ **Settings** — custom `hdc` path (auto-detected by default), scan ports, wireless port, timeouts, and concurrency (saved locally).
+- ⚙️ **Settings** — `hdc` path (defaults to the newest SDK; pick from every detected copy), one-click PATH update, scan ports, wireless port, timeouts, and concurrency (saved locally).
 
 ## Discovery & connection
 
@@ -64,10 +65,13 @@ Get the device into **TCP listening mode** on the LAN (**no USB required**): ena
 
 The app auto-detects the `hdc` executable in this order:
 
-1. The path set manually in **Settings**
-2. The system `PATH`
-3. The OpenHarmony SDK install dir
-   (`%LOCALAPPDATA%\OpenHarmony\Sdk\<version>\toolchains\hdc.exe`, highest version chosen automatically)
+1. The path set manually in **Settings** (the "Detected hdc" dropdown lists every copy found)
+2. Otherwise the hdc from the **newest SDK by API level** (read from the `oh-uni-package.json` beside hdc; ties broken by hdc version). Searched:
+   - DevEco Studio's bundled SDK (`DEVECO_SDK_HOME`, and `Program Files\Huawei\DevEco Studio*\sdk\<name>\openharmony\toolchains`)
+   - Standalone OpenHarmony SDKs (`%LOCALAPPDATA%\OpenHarmony\Sdk\<api>\toolchains`, `~/OpenHarmony/Sdk`, `OHOS_SDK_HOME` / `HOS_SDK_HOME`)
+3. A bare hdc on `PATH` only when no SDK copy exists (PATH often points at an older SDK)
+
+If the terminal `PATH`'s hdc is older than the newest SDK, **Settings** shows a one-click **Update PATH** button: it repoints that PATH entry (user PATH, or system PATH when run as admin) at the newest SDK's `toolchains` dir by editing the registry value in place — other entries untouched, no `setx` 1024-char truncation — and broadcasts the change so newly opened terminals pick it up.
 
 The `HDC_SERVER_PORT` environment variable is inherited automatically (read by `hdc` itself).
 

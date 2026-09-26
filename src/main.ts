@@ -15,6 +15,22 @@ interface HdcInfo {
   path: string;
   version: string;
   server_port: string | null;
+  api_version: number | null;
+  explicit: boolean;
+}
+interface HdcCandidate {
+  path: string;
+  api_version: number | null;
+  sdk_version: string;
+  hdc_version: string;
+  source: string; // "DevEco Studio" | "OpenHarmony SDK" | "PATH"
+}
+interface PathHdc {
+  current: HdcCandidate | null;
+  scope: string; // "user" | "system" | ""
+  entry: string;
+  best: HdcCandidate | null;
+  outdated: boolean;
 }
 interface Device {
   connect_key: string;
@@ -92,6 +108,7 @@ interface Settings {
   concurrency: number;
   pollInterval: number; // seconds; 0 = off
   connectTimeout: number; // hdc tconn timeout (ms)
+  autoRelocate: boolean; // follow history devices to a new IP by MAC
   theme: string;
   lang: Lang;
 }
@@ -103,6 +120,7 @@ const DEFAULTS: Settings = {
   concurrency: 256,
   pollInterval: 10,
   connectTimeout: 2000,
+  autoRelocate: true,
   theme: "eclipse",
   lang: "en",
 };
@@ -390,11 +408,13 @@ async function detectHdc() {
       })
     );
     pill.className = "hdc-pill pill-ok";
-    text.textContent = `hdc ${info.version}`;
+    text.textContent = `hdc ${info.version}${info.api_version != null ? ` · API ${info.api_version}` : ""}`;
     pill.title = info.path;
     detail.innerHTML =
       `<b>${esc(t("hdc.detailPath"))}:</b> ${esc(info.path)}<br/>` +
       `<b>${esc(t("hdc.detailVersion"))}:</b> ${esc(info.version)}<br/>` +
+      `<b>${esc(t("hdc.detailApi"))}:</b> ${esc(info.api_version != null ? String(info.api_version) : "?")}<br/>` +
+      `<b>${esc(t("hdc.detailSource"))}:</b> ${esc(t(info.explicit ? "hdc.sourceManual" : "hdc.sourceAuto"))}<br/>` +
       `<b>${esc(t("hdc.detailServerPort"))}:</b> ${esc(info.server_port ?? t("hdc.notSet"))}`;
   } catch (e) {
     pill.className = "hdc-pill pill-err";
@@ -402,6 +422,77 @@ async function detectHdc() {
     detail.innerHTML =
       `<span style="color:var(--red)">${esc(t("hdc.notFoundHint"))}</span><br/>` +
       `<span class="muted">${esc(String(e))}</span>`;
+  }
+}
+
+// ---------- hdc picker + terminal PATH ----------
+function hdcDesc(c: HdcCandidate): string {
+  return `API ${c.api_version ?? "?"} · hdc ${c.hdc_version || "?"}`;
+}
+
+/** Fill the "detected hdc" dropdown (newest SDK first; "" = auto). */
+async function loadHdcPicker(refresh = false) {
+  const sel = $<HTMLSelectElement>("#set-hdc-pick");
+  try {
+    const list = await invoke<HdcCandidate[]>("list_hdc", { refresh });
+    const sdk = list.filter((c) => c.source !== "PATH");
+    const autoLabel = sdk.length ? t("settings.hdcAuto", { desc: hdcDesc(sdk[0]) }) : t("settings.hdcNone");
+    const current = ($("#set-hdc-path") as HTMLInputElement).value.trim().toLowerCase();
+    sel.innerHTML =
+      `<option value="">${esc(autoLabel)}</option>` +
+      list
+        .map(
+          (c) =>
+            `<option value="${esc(c.path)}"${c.path.toLowerCase() === current ? " selected" : ""}>${esc(
+              `${hdcDesc(c)} · ${c.source} — ${c.path}`
+            )}</option>`
+        )
+        .join("");
+    if (!current) sel.value = "";
+  } catch (e) {
+    sel.innerHTML = `<option value="">${esc(String(e))}</option>`;
+  }
+}
+
+/** Show whether the terminal PATH's hdc lags the newest SDK (with a fix button). */
+async function refreshPathHdc(logIfOutdated = false) {
+  const banner = $("#path-hdc");
+  const ok = $("#path-hdc-ok");
+  try {
+    const st = await invoke<PathHdc>("path_hdc_status");
+    if (st.outdated && st.best) {
+      const best = hdcDesc(st.best);
+      $("#path-hdc-text").textContent = st.current
+        ? t("settings.pathHdcOld", { cur: hdcDesc(st.current), best })
+        : t("settings.pathHdcMissing", { best });
+      $("#btn-update-path").textContent = t(st.current ? "btn.updatePath" : "btn.addPath");
+      $("#btn-update-path").title = st.entry ? `${st.entry} → ${st.best.path}` : st.best.path;
+      banner.classList.remove("hidden");
+      ok.classList.add("hidden");
+      if (logIfOutdated && st.current) log("info", t("log.pathOutdated", { cur: hdcDesc(st.current), best }));
+    } else {
+      banner.classList.add("hidden");
+      ok.textContent = st.current ? t("settings.pathHdcOk", { cur: hdcDesc(st.current) }) : "";
+      ok.classList.toggle("hidden", !st.current);
+    }
+  } catch (e) {
+    banner.classList.add("hidden");
+    ok.classList.add("hidden");
+  }
+}
+
+async function updatePathHdc() {
+  const btn = $<HTMLButtonElement>("#btn-update-path");
+  btn.disabled = true;
+  try {
+    const dir = await invoke<string>("update_path_hdc");
+    log("ok", t("log.pathUpdated", { dir }));
+    toast(t("toast.pathUpdated", { dir }), "ok");
+  } catch (e) {
+    toast(t("toast.pathFail", { e: String(e) }), "err");
+  } finally {
+    btn.disabled = false;
+    await refreshPathHdc();
   }
 }
 
@@ -863,6 +954,93 @@ async function probeHistory() {
     log("err", t("log.historyProbeFail", { e: String(e) }));
   }
   renderHistory();
+  if (settings.autoRelocate) void relocateMovedDevices(currentIds);
+}
+
+// ---------- Follow history devices to a new IP (by MAC) ----------
+// DHCP may hand a device a new IP while its MAC and hdc port stay the same. For
+// offline history devices we look the MAC up in ARP (sweeping the subnet now and
+// then so the OS re-resolves), then only adopt the new ip:port after a real hdc
+// handshake succeeds — an open port alone is not proof.
+let relocating = false;
+let lastRelocateSweep = 0;
+const RELOCATE_SWEEP_MS = 120_000; // at most one subnet-wide ARP sweep per 2 min
+const RELOCATE_RETRY_MS = 300_000; // don't re-try the same failed candidate for 5 min
+const relocateTried: Record<string, number> = {}; // "mac|ip:port" -> last attempt
+
+function normMac(mac: string): string {
+  return mac.trim().toLowerCase().replace(/:/g, "-");
+}
+function portOf(r: DeviceRecord): number | undefined {
+  if (r.lastPort) return r.lastPort;
+  const p = parseInt((r.lastTarget || "").split(":")[1] || "", 10);
+  return p > 0 ? p : undefined;
+}
+
+async function relocateMovedDevices(currentIds: Set<string>) {
+  if (relocating) return;
+  const moved = Object.values(book).filter(
+    (r) => !currentIds.has(r.id) && r.mac && portOf(r) && !isHistoryOnline(r)
+  );
+  if (moved.length === 0) return;
+  relocating = true;
+  try {
+    const sub = selectedSubnet();
+    const sweep = !!sub && Date.now() - lastRelocateSweep > RELOCATE_SWEEP_MS;
+    if (sweep) lastRelocateSweep = Date.now();
+    const found = await invoke<ArpEntry[]>("locate_macs", {
+      macs: moved.map((r) => r.mac!),
+      network: sub?.network ?? null,
+      prefix: sub?.prefix ?? null,
+      sweep,
+    });
+    const ipOfMac = new Map(found.map((e) => [normMac(e.mac), e.ip]));
+    for (const r of moved) {
+      const newIp = ipOfMac.get(normMac(r.mac!));
+      if (!newIp) continue; // not on the LAN (powered off / other network)
+      const port = portOf(r)!;
+      const cand = `${newIp}:${port}`;
+      if (cand === r.lastTarget) continue; // same address — device is there but hdc isn't listening
+      const key = `${normMac(r.mac!)}|${cand}`;
+      if (Date.now() - (relocateTried[key] || 0) < RELOCATE_RETRY_MS) continue;
+      relocateTried[key] = Date.now();
+
+      const name = r.note || r.name || r.mac!;
+      const from = r.lastTarget || "?";
+      log("info", t("log.relocateCheck", { name, from, to: cand }));
+      // Cheap gate first: the port must answer, and (if ARP says) from this very MAC.
+      const probe = await invoke<{ target: string; mac: string | null }[]>("probe_targets", {
+        targets: [cand],
+        timeoutMs: 800,
+      });
+      const ans = probe[0];
+      if (!ans || (ans.mac && normMac(ans.mac) !== normMac(r.mac!))) {
+        log("info", t("log.relocateClosed", { name, target: cand }));
+        continue;
+      }
+      // Real proof: hdc handshake (tconn + list targets). We only want the address,
+      // not a connection, so drop it again right after it checks out.
+      if (await tryConnectQuiet(cand)) {
+        await invoke<CmdOutput>("disconnect_device", { hdcPath: hdcPathArg(), target: cand }).catch(() => {});
+        r.lastTarget = cand;
+        r.lastPort = port;
+        saveBook();
+        arpMap[newIp] = r.mac!;
+        // Show it as online/connectable right away instead of waiting for the next probe.
+        onlineTargets.add(cand);
+        onlineMac[cand] = normMac(r.mac!);
+        log("ok", t("log.relocated", { name, from, to: cand }));
+        toast(t("toast.relocated", { name, to: cand }), "ok");
+        await refreshDevices();
+      } else {
+        log("info", t("log.relocateNoHdc", { name, target: cand }));
+      }
+    }
+  } catch (e) {
+    log("err", t("log.relocateFail", { e: String(e) }));
+  } finally {
+    relocating = false;
+  }
 }
 
 /** Periodic status refresh (connected list + history online check). */
@@ -1421,6 +1599,9 @@ function openSettings() {
   ($("#set-concurrency") as HTMLInputElement).value = String(settings.concurrency);
   ($("#set-poll") as HTMLInputElement).value = String(settings.pollInterval);
   ($("#set-connect-timeout") as HTMLInputElement).value = String(settings.connectTimeout);
+  ($("#set-auto-relocate") as HTMLInputElement).checked = settings.autoRelocate;
+  void loadHdcPicker();
+  void refreshPathHdc();
   // Reflect the live autostart state (registry is the source of truth).
   invoke<boolean>("get_autostart")
     .then((on) => {
@@ -1450,6 +1631,7 @@ function applySettings() {
     connectTimeout:
       parseInt(($("#set-connect-timeout") as HTMLInputElement).value, 10) ||
       DEFAULTS.connectTimeout,
+    autoRelocate: ($("#set-auto-relocate") as HTMLInputElement).checked,
     theme: settings.theme, // theme is applied live via the picker, not the form
     lang: settings.lang, // language is applied live via the picker, not the form
   };
@@ -1552,7 +1734,15 @@ function bindEvents() {
   });
   $("#btn-settings-close").addEventListener("click", closeSettings);
   $("#btn-settings-save").addEventListener("click", applySettings);
-  $("#btn-redetect").addEventListener("click", detectHdc);
+  $("#btn-redetect").addEventListener("click", async () => {
+    await loadHdcPicker(true); // re-scan SDKs (resets the auto pick) …
+    await detectHdc(); // … then show what is used now
+    await refreshPathHdc();
+  });
+  $("#set-hdc-pick").addEventListener("change", (e) => {
+    ($("#set-hdc-path") as HTMLInputElement).value = (e.target as HTMLSelectElement).value;
+  });
+  $("#btn-update-path").addEventListener("click", updatePathHdc);
   $("#settings-modal").addEventListener("click", (e) => {
     if (e.target === $("#settings-modal")) closeSettings();
   });
@@ -1647,6 +1837,7 @@ async function init() {
   bindEvents();
   await bindBackendEvents();
   await Promise.all([detectHdc(), loadInterfaces()]);
+  void refreshPathHdc(true); // just a log hint if the terminal PATH lags the newest SDK
   await refreshDevices();
   await cleanupDeadTcp(); // remove lingering Offline TCP connections
   await probeHistory();

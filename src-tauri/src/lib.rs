@@ -1,7 +1,8 @@
 mod hdc;
+mod pathenv;
 mod scan;
 
-use hdc::{CmdOutput, Device, DiscoverResult, HdcInfo};
+use hdc::{CmdOutput, Device, DiscoverResult, HdcCandidate, HdcInfo};
 use scan::{ArpEntry, Candidate, HostInfo, NetIface};
 use serde::Serialize;
 use std::sync::Mutex;
@@ -117,6 +118,33 @@ where
 #[tauri::command]
 async fn detect_hdc(hdc_path: Option<String>) -> Result<HdcInfo, String> {
     blocking(move || hdc::info(hdc_path.as_deref())).await
+}
+
+/// Every hdc found on this machine, newest SDK API level first. `refresh`
+/// re-scans (e.g. after installing a new SDK) and resets the auto-detected pick.
+#[tauri::command]
+async fn list_hdc(refresh: bool) -> Result<Vec<HdcCandidate>, String> {
+    blocking(move || {
+        Ok(if refresh {
+            hdc::refresh_candidates()
+        } else {
+            hdc::list_candidates()
+        })
+    })
+    .await
+}
+
+/// Which hdc a new terminal's PATH resolves to, vs. the newest SDK's.
+#[tauri::command]
+async fn path_hdc_status() -> Result<pathenv::PathHdc, String> {
+    blocking(|| Ok(pathenv::status())).await
+}
+
+/// Repoint the PATH entry holding hdc at the newest SDK's toolchains dir.
+/// Returns the new directory.
+#[tauri::command]
+async fn update_path_hdc() -> Result<String, String> {
+    blocking(pathenv::update_to_best).await
 }
 
 /// `hdc list targets -v` parsed into structured devices.
@@ -249,6 +277,18 @@ async fn probe_targets(
     timeout_ms: u64,
 ) -> Result<Vec<scan::ProbeResult>, String> {
     Ok(scan::probe_targets(targets, timeout_ms).await)
+}
+
+/// Current IPs of the given MACs (ARP table, optionally after an ARP sweep of
+/// `network/prefix`) — follows history devices whose DHCP lease changed.
+#[tauri::command]
+async fn locate_macs(
+    macs: Vec<String>,
+    network: Option<String>,
+    prefix: Option<u8>,
+    sweep: bool,
+) -> Result<Vec<ArpEntry>, String> {
+    scan::locate_macs(macs, network, prefix, sweep).await
 }
 
 /// Discover LAN hosts via the ARP table (phone/tablet candidates first).
@@ -455,6 +495,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             detect_hdc,
+            list_hdc,
+            path_hdc_status,
+            update_path_hdc,
             list_devices,
             connect_device,
             disconnect_device,
@@ -464,6 +507,7 @@ pub fn run() {
             get_interfaces,
             arp_table,
             probe_targets,
+            locate_macs,
             discover_hosts,
             discover_devices,
             start_scan,

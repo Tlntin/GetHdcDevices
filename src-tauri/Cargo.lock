@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "get-hdc-devices"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "if-addrs",
  "serde",
@@ -1223,6 +1223,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "windows-sys 0.61.2",
+ "winreg",
 ]
 
 [[package]]

@@ -43,12 +43,13 @@
 - 📋 **已连接设备** —— 解析 `hdc list targets -v`，显示连接类型（USB/TCP）与状态，每 10 秒自动刷新。
 - 📶 **开启无线模式** —— 对 USB 连接的设备执行 `hdc tmode port <port>`（设备会重启并进入 TCP 监听）。
 - 🧠 **设备记忆与历史** —— 按 MAC 绑定自定义备注/名称；历史设备重新在线（🟢）时可一键重连。
+- 🔁 **按 MAC 追踪 IP 变化** —— DHCP 给历史设备换了 IP（MAC、端口不变）时，通过 ARP 找到新地址（必要时对网段做一轮 ARP 唤醒，最多 2 分钟一次），用真实的 `hdc tconn` 握手验证可用后立即断开验证连接，只更新保存的地址（历史里显示 🟢 可连接，连不连由你决定）。默认开启，可在设置中关闭。
 - ⌨️ **手动连接** —— 直接输入 `IP:端口` 连接。
 - 🎨 **多主题** —— 4 套现代配色（eclipse / carbon / daybreak / mist），明暗皆备，切换即时无闪烁。
 - 🌐 **多语言界面** —— 支持英文、简体中文、香港繁体，下拉即可切换。首次启动自动识别系统语言（无法匹配时回退英文）。
 - 🖥️ **系统托盘** —— 关闭窗口最小化到托盘；托盘菜单提供 显示 / 扫描 / 开机自启 / 退出，左键单击托盘图标唤出窗口。
 - 🚀 **开机自启动** —— 可选在 Windows 登录后最小化到托盘后台启动。
-- ⚙️ **设置** —— 自定义 `hdc` 路径（默认自动检测）、扫描端口、无线端口、超时、并发数（保存在本地）。
+- ⚙️ **设置** —— `hdc` 路径（默认用最新 SDK 的，可从检测到的所有 hdc 中选择）、一键更新 PATH、扫描端口、无线端口、超时、并发数（保存在本地）。
 
 ## 发现与连接
 
@@ -64,10 +65,13 @@
 
 应用按以下顺序自动定位 `hdc` 可执行文件：
 
-1. **设置**里手动指定的路径
-2. 系统 `PATH`
-3. OpenHarmony SDK 安装目录
-   （`%LOCALAPPDATA%\OpenHarmony\Sdk\<版本>\toolchains\hdc.exe`，自动选最高版本）
+1. **设置**里手动指定的路径（「检测到的 hdc」下拉框会列出找到的所有 hdc）
+2. 否则用 **API 版本最新的 SDK** 里的 hdc（API 版本读自 hdc 旁边的 `oh-uni-package.json`，相同时比 hdc 版本）。搜索范围：
+   - DevEco Studio 自带 SDK（`DEVECO_SDK_HOME`，以及 `Program Files\Huawei\DevEco Studio*\sdk\<名称>\openharmony\toolchains`）
+   - 独立安装的 OpenHarmony SDK（`%LOCALAPPDATA%\OpenHarmony\Sdk\<API>\toolchains`、`~/OpenHarmony/Sdk`、`OHOS_SDK_HOME` / `HOS_SDK_HOME`）
+3. 只有找不到任何 SDK 时才用 `PATH` 里的 hdc（PATH 往往指向旧 SDK）
+
+如果终端 `PATH` 里的 hdc 比最新 SDK 旧，**设置**里会出现「一键更新 PATH」按钮：直接改注册表里的 PATH 值（用户 PATH；系统 PATH 需以管理员身份运行），只把含 hdc 的那一项换成最新 SDK 的 `toolchains` 目录，其它条目不动，也不会像 `setx` 那样把超过 1024 字符的 PATH 截断；改完广播环境变量变更，新开的终端即生效。
 
 环境变量 `HDC_SERVER_PORT` 会被自动继承（由 `hdc` 自身读取）。
 

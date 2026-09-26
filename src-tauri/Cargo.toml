@@ -1,6 +1,6 @@
 [package]
 name = "get-hdc-devices"
-version = "0.2.0"
+version = "0.3.0"
 description = "HDC wireless LAN device scanner"
 authors = ["you"]
 edition = "2021"
@@ -27,3 +27,7 @@ socket2 = "0.5"
 opt-level = "s"
 lto = true
 strip = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

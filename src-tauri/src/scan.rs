@@ -763,19 +763,9 @@ async fn resolve_hostname(ip: Ipv4Addr) -> String {
     String::new()
 }
 
-/// Discover hosts on `network/prefix`: trigger ARP resolution for every host,
-/// then read the ARP table. Returns hosts with a MAC, phone/tablet candidates
-/// (randomized MAC) sorted first.
-pub async fn discover_hosts(network: String, prefix: u8) -> Result<Vec<HostInfo>, String> {
-    let net: Ipv4Addr = network
-        .trim()
-        .parse()
-        .map_err(|_| format!("无效的网络地址: {network}"))?;
-    let host_list = hosts(net, prefix)?;
-    let host_set: HashSet<Ipv4Addr> = host_list.iter().copied().collect();
-
-    // Fire short connects to populate the ARP cache (ARP resolves before the SYN,
-    // so even hosts that drop the packet still answer ARP at layer 2).
+/// Fire short connects to populate the ARP cache (ARP resolves before the SYN,
+/// so even hosts that drop the packet still answer ARP at layer 2).
+async fn arp_warmup(host_list: Vec<Ipv4Addr>) {
     let sem = Arc::new(Semaphore::new(256));
     let mut set: JoinSet<()> = JoinSet::new();
     for ip in host_list {
@@ -788,6 +778,57 @@ pub async fn discover_hosts(network: String, prefix: u8) -> Result<Vec<HostInfo>
     }
     while set.join_next().await.is_some() {}
     tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+/// `aa:BB-cc…` → `aa-bb-cc…` (the `arp -a` form), so MACs compare reliably.
+fn norm_mac(mac: &str) -> String {
+    mac.trim().to_ascii_lowercase().replace(':', "-")
+}
+
+/// Where are these MACs on the LAN now? Reads the ARP table; if some MAC is
+/// missing and `sweep` is set, first knocks every host on `network/prefix` so the
+/// OS re-resolves ARP (a device that changed IP is usually not cached yet), then
+/// reads again. Used to follow history devices whose DHCP lease moved them.
+pub async fn locate_macs(
+    macs: Vec<String>,
+    network: Option<String>,
+    prefix: Option<u8>,
+    sweep: bool,
+) -> Result<Vec<ArpEntry>, String> {
+    let wanted: HashSet<String> = macs.iter().map(|m| norm_mac(m)).collect();
+    let pick = |arp: std::collections::HashMap<Ipv4Addr, String>| -> Vec<ArpEntry> {
+        arp.into_iter()
+            .filter(|(_, mac)| wanted.contains(&norm_mac(mac)))
+            .map(|(ip, mac)| ArpEntry { ip: ip.to_string(), mac })
+            .collect()
+    };
+    let mut found = pick(tokio::task::spawn_blocking(read_arp_table).await.unwrap_or_default());
+    let all_found = wanted.iter().all(|w| found.iter().any(|e| &norm_mac(&e.mac) == w));
+    if sweep && !all_found {
+        if let (Some(network), Some(prefix)) = (network, prefix) {
+            let net: Ipv4Addr = network
+                .trim()
+                .parse()
+                .map_err(|_| format!("无效的网络地址: {network}"))?;
+            arp_warmup(hosts(net, prefix)?).await;
+            found = pick(tokio::task::spawn_blocking(read_arp_table).await.unwrap_or_default());
+        }
+    }
+    Ok(found)
+}
+
+/// Discover hosts on `network/prefix`: trigger ARP resolution for every host,
+/// then read the ARP table. Returns hosts with a MAC, phone/tablet candidates
+/// (randomized MAC) sorted first.
+pub async fn discover_hosts(network: String, prefix: u8) -> Result<Vec<HostInfo>, String> {
+    let net: Ipv4Addr = network
+        .trim()
+        .parse()
+        .map_err(|_| format!("无效的网络地址: {network}"))?;
+    let host_list = hosts(net, prefix)?;
+    let host_set: HashSet<Ipv4Addr> = host_list.iter().copied().collect();
+
+    arp_warmup(host_list).await;
 
     let arp = tokio::task::spawn_blocking(read_arp_table)
         .await
@@ -859,4 +900,37 @@ pub async fn discover_hosts(network: String, prefix: u8) -> Result<Vec<HostInfo>
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod locate_tests {
+    use super::*;
+
+    #[test]
+    fn mac_forms_compare_equal() {
+        assert_eq!(norm_mac(" AA:bb:CC:dd:EE:ff "), "aa-bb-cc-dd-ee-ff");
+        assert_eq!(norm_mac("aa-bb-cc-dd-ee-ff"), "aa-bb-cc-dd-ee-ff");
+    }
+
+    /// Live LAN check: `cargo test locate -- --ignored --nocapture`.
+    /// Finds the gateway's MAC in ARP, then asks locate_macs to map it back (with and
+    /// without a subnet sweep); also a random MAC must come back empty.
+    #[tokio::test]
+    #[ignore]
+    async fn live_locate_gateway_by_mac() {
+        let gw: Ipv4Addr = "192.168.3.4".parse().unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(300), TcpStream::connect((gw, 22))).await;
+        let mac = read_arp_table().get(&gw).cloned().expect("gateway in ARP");
+        let upper = mac.to_ascii_uppercase().replace('-', ":");
+        let t0 = std::time::Instant::now();
+        let hit = locate_macs(vec![upper], None, None, false).await.unwrap();
+        println!("no-sweep: {hit:?} in {:?}", t0.elapsed());
+        assert!(hit.iter().any(|e| e.ip == "192.168.3.4"));
+        let t1 = std::time::Instant::now();
+        let miss = locate_macs(vec!["02-00-00-de-ad-01".into()], Some("192.168.3.0".into()), Some(24), true)
+            .await
+            .unwrap();
+        println!("sweep for unknown MAC: {miss:?} in {:?}", t1.elapsed());
+        assert!(miss.is_empty());
+    }
 }

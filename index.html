@@ -185,8 +185,17 @@
           </div>
           <label class="field">
             <span data-i18n="settings.hdcPath">hdc executable path (blank = auto-detect)</span>
-            <input id="set-hdc-path" type="text" data-i18n-ph="settings.hdcPathPlaceholder" placeholder="Auto-detect OpenHarmony SDK / PATH" />
+            <input id="set-hdc-path" type="text" data-i18n-ph="settings.hdcPathPlaceholder" placeholder="Blank = auto-pick the newest SDK's hdc" />
           </label>
+          <div class="field">
+            <span data-i18n="settings.hdcPick">Detected hdc (newest SDK first)</span>
+            <select id="set-hdc-pick" class="lang-select-full"></select>
+          </div>
+          <div id="path-hdc" class="banner hidden" style="margin-top:0">
+            <span class="banner-text" id="path-hdc-text"></span>
+            <button id="btn-update-path" class="btn btn-primary btn-sm"></button>
+          </div>
+          <div id="path-hdc-ok" class="muted small hidden"></div>
           <div class="field-grid">
             <label class="field">
               <span data-i18n="settings.defaultPorts">Default scan ports</span>
@@ -213,7 +222,10 @@
               <input id="set-connect-timeout" type="number" placeholder="2000" />
             </label>
           </div>
-          <label class="chk" style="margin-top:6px">
+          <label class="chk" style="margin-top:6px; height:auto; min-height:38px; line-height:1.45">
+            <input type="checkbox" id="set-auto-relocate" /> <span data-i18n="settings.autoRelocate">Follow IP changes by MAC (when a history device gets a new IP, find it, verify hdc, then update the saved address — without staying connected)</span>
+          </label>
+          <label class="chk">
             <input type="checkbox" id="set-autostart" /> <span data-i18n="settings.autostart">Launch on startup (start minimized to the tray after Windows login)</span>
           </label>
           <div id="hdc-detail" class="hdc-detail muted small"></div>
