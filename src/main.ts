@@ -499,6 +499,7 @@ async function updatePathHdc() {
 // ---------- Interfaces ----------
 async function loadInterfaces() {
   const sel = $<HTMLSelectElement>("#iface-select");
+  const prev = sel.selectedOptions[0]?.dataset.network;
   sel.innerHTML = "";
   try {
     const ifaces = await invoke<NetIface[]>("get_interfaces");
@@ -521,6 +522,7 @@ async function loadInterfaces() {
           hosts: f.usable_hosts,
         }) + tag;
       sel.appendChild(opt);
+      if (f.network === prev) opt.selected = true;
     }
   } catch (e) {
     toast(t("toast.ifaceFail", { e: String(e) }), "err");
@@ -787,6 +789,7 @@ function openDeviceModal(ctx: {
   $("#dm-extra").textContent = ctx.extra || "";
   // Delete only makes sense for a saved history record.
   ($("#dm-delete") as HTMLElement).style.display = ctx.mode === "history" ? "" : "none";
+  ($("#dm-relocate") as HTMLElement).style.display = ctx.mode === "history" && ctx.mac ? "" : "none";
   // Connected devices get 断开 (red); history/host get 连接 (blue).
   const primary = $("#dm-connect") as HTMLButtonElement;
   const connected = ctx.mode === "connected";
@@ -917,10 +920,10 @@ async function refreshDevices() {
 }
 
 /** Probe history devices' last ip:port to see which are online/reconnectable. */
-async function probeHistory() {
-  const currentIds = new Set(
-    devices.filter((d) => isCurrent(d) && isManaged(d)).map((d) => identityFor(d.connect_key).id)
-  );
+/** `relocate`: run (and await) a relocate pass with these options instead of the
+ * background ARP-table-only check. */
+async function probeHistory(relocate?: RelocateOpts) {
+  const currentIds = currentIdSet();
   const targets = Object.values(book)
     .filter((r) => !currentIds.has(r.id) && r.lastTarget)
     .map((r) => r.lastTarget!) as string[];
@@ -954,7 +957,8 @@ async function probeHistory() {
     log("err", t("log.historyProbeFail", { e: String(e) }));
   }
   renderHistory();
-  if (settings.autoRelocate) void relocateMovedDevices(currentIds);
+  if (relocate) await relocateMovedDevices(currentIds, relocate);
+  else if (settings.autoRelocate) void relocateMovedDevices(currentIds);
 }
 
 // ---------- Follow history devices to a new IP (by MAC) ----------
@@ -963,8 +967,10 @@ async function probeHistory() {
 // then so the OS re-resolves), then only adopt the new ip:port after a real hdc
 // handshake succeeds — an open port alone is not proof.
 let relocating = false;
-let lastRelocateSweep = 0;
-const RELOCATE_SWEEP_MS = 120_000; // at most one subnet-wide ARP sweep per 2 min
+// Every poll only re-reads the ARP table. The subnet-wide sweep (knock every
+// address so the OS re-learns MACs) runs once ~90 s after launch, then only on
+// demand: "Refresh all" in the history panel, or "Find new IP" on one device.
+const STARTUP_SWEEP_DELAY_MS = 90_000;
 const RELOCATE_RETRY_MS = 300_000; // don't re-try the same failed candidate for 5 min
 const relocateTried: Record<string, number> = {}; // "mac|ip:port" -> last attempt
 
@@ -977,17 +983,39 @@ function portOf(r: DeviceRecord): number | undefined {
   return p > 0 ? p : undefined;
 }
 
-async function relocateMovedDevices(currentIds: Set<string>) {
-  if (relocating) return;
+interface RelocateOpts {
+  /** Knock the whole subnet first so devices that moved show up in ARP. */
+  sweep?: boolean;
+  /** Only this history record. */
+  onlyId?: string;
+  /** User asked: ignore the per-candidate retry cooldown. */
+  force?: boolean;
+}
+type RelocateOutcome = "notFound" | "same" | "closed" | "noHdc" | "relocated";
+
+/** Returns what happened per record id (empty if nothing was checked). */
+async function relocateMovedDevices(
+  currentIds: Set<string>,
+  opts: RelocateOpts = {}
+): Promise<Map<string, RelocateOutcome>> {
+  const outcome = new Map<string, RelocateOutcome>();
+  if (relocating) {
+    if (!opts.force) return outcome; // a background pass is running; skip this one
+    while (relocating) await new Promise((r) => setTimeout(r, 200));
+  }
   const moved = Object.values(book).filter(
-    (r) => !currentIds.has(r.id) && r.mac && portOf(r) && !isHistoryOnline(r)
+    (r) =>
+      (!opts.onlyId || r.id === opts.onlyId) &&
+      !currentIds.has(r.id) &&
+      r.mac &&
+      portOf(r) &&
+      !isHistoryOnline(r)
   );
-  if (moved.length === 0) return;
+  if (moved.length === 0) return outcome;
   relocating = true;
   try {
     const sub = selectedSubnet();
-    const sweep = !!sub && Date.now() - lastRelocateSweep > RELOCATE_SWEEP_MS;
-    if (sweep) lastRelocateSweep = Date.now();
+    const sweep = !!opts.sweep && !!sub;
     const found = await invoke<ArpEntry[]>("locate_macs", {
       macs: moved.map((r) => r.mac!),
       network: sub?.network ?? null,
@@ -997,12 +1025,14 @@ async function relocateMovedDevices(currentIds: Set<string>) {
     const ipOfMac = new Map(found.map((e) => [normMac(e.mac), e.ip]));
     for (const r of moved) {
       const newIp = ipOfMac.get(normMac(r.mac!));
+      outcome.set(r.id, "notFound");
       if (!newIp) continue; // not on the LAN (powered off / other network)
       const port = portOf(r)!;
       const cand = `${newIp}:${port}`;
+      outcome.set(r.id, "same");
       if (cand === r.lastTarget) continue; // same address — device is there but hdc isn't listening
       const key = `${normMac(r.mac!)}|${cand}`;
-      if (Date.now() - (relocateTried[key] || 0) < RELOCATE_RETRY_MS) continue;
+      if (!opts.force && Date.now() - (relocateTried[key] || 0) < RELOCATE_RETRY_MS) continue;
       relocateTried[key] = Date.now();
 
       const name = r.note || r.name || r.mac!;
@@ -1015,6 +1045,7 @@ async function relocateMovedDevices(currentIds: Set<string>) {
       });
       const ans = probe[0];
       if (!ans || (ans.mac && normMac(ans.mac) !== normMac(r.mac!))) {
+        outcome.set(r.id, "closed");
         log("info", t("log.relocateClosed", { name, target: cand }));
         continue;
       }
@@ -1029,10 +1060,12 @@ async function relocateMovedDevices(currentIds: Set<string>) {
         // Show it as online/connectable right away instead of waiting for the next probe.
         onlineTargets.add(cand);
         onlineMac[cand] = normMac(r.mac!);
+        outcome.set(r.id, "relocated");
         log("ok", t("log.relocated", { name, from, to: cand }));
         toast(t("toast.relocated", { name, to: cand }), "ok");
         await refreshDevices();
       } else {
+        outcome.set(r.id, "noHdc");
         log("info", t("log.relocateNoHdc", { name, target: cand }));
       }
     }
@@ -1041,13 +1074,38 @@ async function relocateMovedDevices(currentIds: Set<string>) {
   } finally {
     relocating = false;
   }
+  return outcome;
+}
+
+/** "Find new IP" on one history device. */
+async function relocateOne(id: string) {
+  const r = book[id];
+  if (!r) return;
+  const name = r.note || r.name || r.mac || id;
+  if (isHistoryOnline(r)) {
+    toast(t("toast.relocateStillThere", { name }), "ok");
+    return;
+  }
+  toast(t("toast.relocateSearching", { name }), "info");
+  const res = (await relocateMovedDevices(currentIdSet(), { sweep: true, force: true, onlyId: id })).get(id);
+  // undefined: nothing to check (no saved hdc port) — same advice as not found.
+  if (res === "notFound" || res === undefined) toast(t("toast.relocateNotFound", { name }), "info");
+  else if (res === "same" || res === "closed" || res === "noHdc")
+    toast(t("toast.relocateNoHdc", { name }), "err");
+  // "relocated" toasts on its own.
+}
+
+function currentIdSet(): Set<string> {
+  return new Set(
+    devices.filter((d) => isCurrent(d) && isManaged(d)).map((d) => identityFor(d.connect_key).id)
+  );
 }
 
 /** Periodic status refresh (connected list + history online check). */
-async function pollStatus() {
+async function pollStatus(relocate?: RelocateOpts) {
   if (scanning || scanAllRunning) return;
   await refreshDevices();
-  await probeHistory();
+  await probeHistory(relocate);
 }
 
 function stopPolling() {
@@ -1657,9 +1715,10 @@ function bindEvents() {
   $("#btn-host-scan").addEventListener("click", discoverHosts);
   $("#btn-scan-all").addEventListener("click", scanAll);
   $("#only-mobile").addEventListener("change", renderHosts);
+  // "Refresh all": online status, plus a subnet sweep to find devices that moved.
   $("#btn-history-refresh").addEventListener("click", () => {
     toast(t("toast.refreshingOnline"), "info");
-    pollStatus();
+    pollStatus({ sweep: true, force: true });
   });
   $("#btn-device-refresh").addEventListener("click", async () => {
     toast(t("toast.refreshingDevices"), "info");
@@ -1704,6 +1763,11 @@ function bindEvents() {
   $("#dm-connect").addEventListener("click", dmPrimary);
   $("#dm-save").addEventListener("click", () => dmSaveNote());
   $("#dm-delete").addEventListener("click", dmDelete);
+  $("#dm-relocate").addEventListener("click", () => {
+    const id = dmCtx?.bookId;
+    closeDeviceModal();
+    if (id) void relocateOne(id);
+  });
   $("#device-modal").addEventListener("click", (e) => {
     if (e.target === $("#device-modal")) closeDeviceModal();
   });
@@ -1842,6 +1906,13 @@ async function init() {
   await cleanupDeadTcp(); // remove lingering Offline TCP connections
   await probeHistory();
   startPolling();
+  // One sweep shortly after launch. At login the real NIC may come up after us,
+  // so re-read the interfaces first (keeps the user's pick if it still exists).
+  setTimeout(async () => {
+    if (!settings.autoRelocate) return;
+    await loadInterfaces();
+    await relocateMovedDevices(currentIdSet(), { sweep: true });
+  }, STARTUP_SWEEP_DELAY_MS);
 }
 
 window.addEventListener("DOMContentLoaded", init);

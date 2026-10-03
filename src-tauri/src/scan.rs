@@ -14,10 +14,10 @@ use std::net::Ipv4Addr;
 use std::process::Command as SysCommand;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
@@ -57,6 +57,8 @@ pub struct NetIface {
     pub network: String,
     pub usable_hosts: usize,
     pub is_private: bool,
+    /// Hyper-V / WSL / VM / VPN adapter — listed after real NICs.
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +88,68 @@ pub struct HostInfo {
     pub note: String,
     /// Best-effort device name resolved without hdc (reverse DNS / NetBIOS).
     pub hostname: String,
+}
+
+/// Virtual adapters (Hyper-V "Default Switch", WSL, VMs, VPN/TUN) rarely hold a
+/// phone, and a TUN VPN may capture their traffic — never default to them.
+fn is_virtual_iface(name: &str, ip: Ipv4Addr) -> bool {
+    const HINTS: [&str; 14] = [
+        "vethernet", "wsl", "hyper-v", "vmware", "virtualbox", "vbox", "tun", "tap", "wintun",
+        "wireguard", "openvpn", "zerotier", "tailscale", "bluetooth",
+    ];
+    let n = name.to_ascii_lowercase();
+    // 198.18.0.0/15: the benchmark range TUN VPNs (TonBo, Clash…) put their adapter in.
+    HINTS.iter().any(|h| n.contains(h)) || u32::from(ip) & 0xFFFE_0000 == 0xC612_0000
+}
+
+/// Local IPv4 subnets as (address, network, mask), cached for a few seconds —
+/// a subnet sweep asks once per connect.
+fn local_subnets() -> Vec<(Ipv4Addr, u32, u32)> {
+    static CACHE: OnceLock<std::sync::Mutex<(Option<Instant>, Vec<(Ipv4Addr, u32, u32)>)>> = OnceLock::new();
+    let mut c = CACHE.get_or_init(Default::default).lock().unwrap();
+    if c.0.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
+        c.1 = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|i| !i.is_loopback())
+            .filter_map(|i| match i.addr {
+                if_addrs::IfAddr::V4(v4) => {
+                    let mask = u32::from(v4.netmask);
+                    (mask != 0).then_some((v4.ip, u32::from(v4.ip) & mask, mask))
+                }
+                _ => None,
+            })
+            .collect();
+        c.0 = Some(Instant::now());
+    }
+    c.1.clone()
+}
+
+/// Our address on the subnet `ip` is on, if it's on-link (most specific wins).
+fn source_for(ip: Ipv4Addr) -> Option<Ipv4Addr> {
+    let t = u32::from(ip);
+    local_subnets()
+        .into_iter()
+        .filter(|(_, net, mask)| t & mask == *net)
+        .max_by_key(|(_, _, mask)| mask.count_ones())
+        .map(|(addr, _, _)| addr)
+}
+
+/// TCP connect pinned to the NIC that owns `ip`'s subnet.
+///
+/// A full-tunnel VPN in TUN mode (e.g. TonBo: wintun + hev-socks5-tunnel) routes
+/// 0.0.0.0/0 to its adapter, and Windows may pick that even for an on-link subnet
+/// (seen with the Hyper-V Default Switch). The VPN's userspace stack then answers
+/// every SYN itself: every port looks open, ARP never happens, and each sweep
+/// leaves thousands of dead sessions in the VPN until it stalls for everyone.
+/// Binding the source address keeps the packet on the real interface (Windows'
+/// strong host model). Off-subnet targets use normal routing.
+async fn connect(ip: Ipv4Addr, port: u16) -> std::io::Result<TcpStream> {
+    let sock = TcpSocket::new_v4()?;
+    if let Some(src) = source_for(ip) {
+        sock.bind((src, 0).into())?;
+    }
+    sock.connect((ip, port).into()).await
 }
 
 fn prefix_from_mask(mask: Ipv4Addr) -> u8 {
@@ -157,11 +221,14 @@ pub fn interfaces() -> Vec<NetIface> {
             network: Ipv4Addr::from(net).to_string(),
             usable_hosts: usable,
             is_private: is_private_v4(ip),
+            is_virtual: is_virtual_iface(&iface.name, ip),
         });
     }
+    // Real private NICs first (the first entry is the default pick), then by size.
     out.sort_by(|a, b| {
-        b.is_private
-            .cmp(&a.is_private)
+        (b.is_private && !b.is_virtual)
+            .cmp(&(a.is_private && !a.is_virtual))
+            .then(b.is_private.cmp(&a.is_private))
             .then(a.usable_hosts.cmp(&b.usable_hosts))
     });
     out
@@ -223,7 +290,7 @@ async fn run_probes(
                 return;
             }
             let open = matches!(
-                tokio::time::timeout(timeout, TcpStream::connect((ip, port))).await,
+                tokio::time::timeout(timeout, connect(ip, port)).await,
                 Ok(Ok(_))
             );
             if open {
@@ -383,7 +450,7 @@ pub async fn probe_targets(targets: Vec<String>, timeout_ms: u64) -> Vec<ProbeRe
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok();
             if matches!(
-                tokio::time::timeout(timeout, TcpStream::connect((ip, port))).await,
+                tokio::time::timeout(timeout, connect(ip, port)).await,
                 Ok(Ok(_))
             ) {
                 open.lock().await.push(t);
@@ -763,22 +830,28 @@ async fn resolve_hostname(ip: Ipv4Addr) -> String {
     String::new()
 }
 
-/// Fire short connects to populate the ARP cache (ARP resolves before the SYN,
-/// so even hosts that drop the packet still answer ARP at layer 2).
+/// Populate the ARP cache: one UDP datagram per host to the discard port, sent
+/// from our address on that subnet (see `connect`). ARP resolves before the packet
+/// leaves, so even hosts that drop it answer at layer 2 — and unlike TCP knocks
+/// this leaves no connection state anywhere (TCP knocks into a TUN VPN used to
+/// pile up thousands of half-open sessions per sweep).
 async fn arp_warmup(host_list: Vec<Ipv4Addr>) {
-    let sem = Arc::new(Semaphore::new(256));
-    let mut set: JoinSet<()> = JoinSet::new();
-    for ip in host_list {
-        let sem = sem.clone();
-        set.spawn(async move {
-            let _permit = sem.acquire_owned().await.ok();
-            let _ =
-                tokio::time::timeout(Duration::from_millis(150), TcpStream::connect((ip, 9))).await;
-        });
+    let Some(&first) = host_list.first() else { return };
+    let src = source_for(first).unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let Ok(sock) = tokio::net::UdpSocket::bind((src, 0)).await else { return };
+    for (i, ip) in host_list.into_iter().enumerate() {
+        let _ = sock.send_to(&[0], (ip, 9)).await;
+        if i % 64 == 63 {
+            tokio::time::sleep(Duration::from_millis(5)).await; // don't burst the NIC
+        }
     }
-    while set.join_next().await.is_some() {}
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Let the ARP replies land.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 }
+
+/// Auto-relocate sweeps only LAN-sized subnets (≤ /22); a manual discover is
+/// still allowed on bigger ones.
+const MAX_RELOCATE_SWEEP_HOSTS: usize = 1022;
 
 /// `aa:BB-cc…` → `aa-bb-cc…` (the `arp -a` form), so MACs compare reliably.
 fn norm_mac(mac: &str) -> String {
@@ -810,8 +883,11 @@ pub async fn locate_macs(
                 .trim()
                 .parse()
                 .map_err(|_| format!("无效的网络地址: {network}"))?;
-            arp_warmup(hosts(net, prefix)?).await;
-            found = pick(tokio::task::spawn_blocking(read_arp_table).await.unwrap_or_default());
+            let list = hosts(net, prefix)?;
+            if list.len() <= MAX_RELOCATE_SWEEP_HOSTS {
+                arp_warmup(list).await;
+                found = pick(tokio::task::spawn_blocking(read_arp_table).await.unwrap_or_default());
+            }
         }
     }
     Ok(found)
@@ -912,6 +988,40 @@ mod locate_tests {
         assert_eq!(norm_mac("aa-bb-cc-dd-ee-ff"), "aa-bb-cc-dd-ee-ff");
     }
 
+    #[test]
+    fn virtual_adapters_are_recognized() {
+        let lan: Ipv4Addr = "192.168.3.12".parse().unwrap();
+        assert!(!is_virtual_iface("以太网 4", lan));
+        assert!(!is_virtual_iface("WLAN", lan));
+        assert!(is_virtual_iface("vEthernet (Default Switch)", "172.22.96.1".parse().unwrap()));
+        assert!(is_virtual_iface("tun0", "198.18.0.1".parse().unwrap()));
+        assert!(is_virtual_iface("whatever", "198.19.255.1".parse().unwrap()));
+        assert!(!is_virtual_iface("whatever", "198.20.0.1".parse().unwrap()));
+    }
+
+    /// Live: UDP knocks must still fill ARP for the LAN.
+    /// `cargo test live_discover -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_discover_lan() {
+        let t0 = std::time::Instant::now();
+        let hosts = discover_hosts("192.168.3.0".into(), 24).await.unwrap();
+        println!("{} hosts in {:?}: {:?}", hosts.len(), t0.elapsed(), hosts.iter().map(|h| &h.ip).collect::<Vec<_>>());
+        assert!(hosts.iter().any(|h| h.ip == "192.168.3.4"), "gateway must be found");
+    }
+
+    /// Live: with a TUN VPN up, an unbound connect to a dead Hyper-V address
+    /// "succeeds" inside the VPN; the pinned one must not.
+    /// `cargo test pinned -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_pinned_connect_skips_tun() {
+        let dead: Ipv4Addr = "172.22.99.5".parse().unwrap();
+        println!("source for {dead}: {:?}", source_for(dead));
+        let r = tokio::time::timeout(Duration::from_millis(800), connect(dead, 9)).await;
+        assert!(!matches!(r, Ok(Ok(_))), "pinned connect must not be answered by the VPN");
+    }
+
     /// Live LAN check: `cargo test locate -- --ignored --nocapture`.
     /// Finds the gateway's MAC in ARP, then asks locate_macs to map it back (with and
     /// without a subnet sweep); also a random MAC must come back empty.
@@ -919,7 +1029,7 @@ mod locate_tests {
     #[ignore]
     async fn live_locate_gateway_by_mac() {
         let gw: Ipv4Addr = "192.168.3.4".parse().unwrap();
-        let _ = tokio::time::timeout(Duration::from_millis(300), TcpStream::connect((gw, 22))).await;
+        let _ = tokio::time::timeout(Duration::from_millis(300), connect(gw, 22)).await;
         let mac = read_arp_table().get(&gw).cloned().expect("gateway in ARP");
         let upper = mac.to_ascii_uppercase().replace('-', ":");
         let t0 = std::time::Instant::now();
